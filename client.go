@@ -42,9 +42,13 @@ type Config struct {
 	SendBuffer   int    // per-stream send buffer. Default 64 KiB.
 	MaxStreams   int    // Default 64.
 	// TCP controls TCP/53 paths: "auto" (default) adds one for a resolver whose UDP path never
-	// answers, "on" adds one for every resolver up front, "off" never does.
-	TCP    string
-	Logger *slog.Logger
+	// answers, "on" adds one for every resolver up front, "only" uses TCP alone, "off" never.
+	TCP string
+	// ListenPacket opens the client's UDP socket, and DialTCP its TCP/53 connections; a VPN
+	// client points them past its own tunnel, a test harness through a proxy. Defaults: net.
+	ListenPacket func(ctx context.Context, network, address string) (net.PacketConn, error)
+	DialTCP      func(ctx context.Context, network, address string) (net.Conn, error)
+	Logger       *slog.Logger
 }
 
 // maxLimitClass is the answer-size class for MaxAnswer (512 + 48*class bytes).
@@ -87,6 +91,14 @@ func (c *Config) setDefaults() {
 	}
 	if c.TCP == "" {
 		c.TCP = "auto"
+	}
+	if c.ListenPacket == nil {
+		var lc net.ListenConfig
+		c.ListenPacket = lc.ListenPacket
+	}
+	if c.DialTCP == nil {
+		d := &net.Dialer{Timeout: 5 * time.Second}
+		c.DialTCP = d.DialContext
 	}
 	c.Discovery.setDefaults()
 }
@@ -226,7 +238,7 @@ func NewClient(cfg Config) (*Client, error) {
 	if len(cfg.Resolvers) == 0 && !cfg.Discovery.Enabled {
 		return nil, errors.New("soar: no resolvers and discovery is off")
 	}
-	pc, err := net.ListenPacket("udp", ":0")
+	pc, err := cfg.ListenPacket(context.Background(), "udp", ":0")
 	if err != nil {
 		return nil, err
 	}
@@ -262,6 +274,10 @@ func (c *Client) addPathLocked(r string) error {
 		if p.addr.String() == ua.String() {
 			return nil
 		}
+	}
+	if c.cfg.TCP == "only" {
+		c.paths = append(c.paths, c.newPath(ua, true))
+		return nil
 	}
 	c.paths = append(c.paths, c.newPath(ua, false))
 	if c.cfg.TCP == "on" {

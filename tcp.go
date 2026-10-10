@@ -1,6 +1,7 @@
 package soar
 
 import (
+	"context"
 	"encoding/binary"
 	"io"
 	"net"
@@ -47,7 +48,9 @@ func (l *tcpLink) run(c *Client) {
 			return
 		default:
 		}
-		conn, err := net.DialTimeout("tcp", l.addr, 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		conn, err := c.cfg.DialTCP(ctx, "tcp", l.addr)
+		cancel()
 		if err != nil {
 			select {
 			case <-c.done:

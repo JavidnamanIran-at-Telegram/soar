@@ -1092,3 +1092,23 @@ func TestApexSOAAndNoData(t *testing.T) {
 		}
 	}
 }
+
+func TestTCPOnlyThroughCustomDialer(t *testing.T) {
+	srv, pub := startServer(t)
+	origin := startOrigin(t)
+	res := tcpOnlyResolver(t, srv)
+	var dials atomic.Int32
+	c, err := NewClient(Config{Zone: testZone, ServerKey: pub, Resolvers: []string{res}, TCP: "only",
+		DialTCP: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dials.Add(1)
+			return (&net.Dialer{}).DialContext(ctx, network, addr)
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	fetch(t, c, origin, 30<<10)
+	if dials.Load() == 0 {
+		t.Fatal("custom TCP dialer unused")
+	}
+}
