@@ -1,6 +1,7 @@
 package soar
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -50,7 +51,9 @@ type stream struct {
 	dead            chan struct{} // closed when the stream is closed locally or aborted
 	deadClosed      bool
 	aborted         chan struct{} // closed only on a true abort (reset in both directions)
-	serving         bool          // server: serveStream still owns it; it stays counted until done
+	opened          chan struct{} // client: closed when the server reports its dial succeeded
+	openedClosed    bool
+	serving         bool // server: serveStream still owns it; it stays counted until done
 	rdl, wdl        deadline
 }
 
@@ -59,7 +62,7 @@ func newStream(s *session, id uint64) *stream {
 		id: id, s: s,
 		smax: initialWindow, scap: s.cfg.SendBuffer,
 		rwin: s.cfg.StreamWindow, rmax: initialWindow,
-		readCh: make(chan struct{}, 1), writeCh: make(chan struct{}, 1), dead: make(chan struct{}), aborted: make(chan struct{}),
+		readCh: make(chan struct{}, 1), writeCh: make(chan struct{}, 1), dead: make(chan struct{}), aborted: make(chan struct{}), opened: make(chan struct{}),
 	}
 }
 
@@ -232,6 +235,25 @@ func (st *stream) kill() {
 	}
 	signal(st.readCh)
 	signal(st.writeCh)
+}
+
+// waitOpened blocks until the server reports the stream's destination dial succeeded, the
+// stream is aborted (the dial failed), or ctx ends.
+func (c *Conn) waitOpened(ctx context.Context) error {
+	st := c.st
+	select {
+	case <-st.opened:
+		return nil
+	case <-st.aborted:
+		st.s.mu.Lock()
+		err := st.resetErr
+		st.s.mu.Unlock()
+		return err
+	case <-st.s.done:
+		return ErrClosed
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Conn wraps a stream as a net.Conn.

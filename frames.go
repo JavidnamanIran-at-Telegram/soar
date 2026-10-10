@@ -13,6 +13,7 @@ const (
 	frMaxStream = 0x04 // stream id, max offset the sender may send to
 	frClose     = 0x05 // code: the session is over
 	frLost      = 0x06 // client→server: upstream pns whose queries got no usable answer
+	frOpened    = 0x07 // server→client: stream id, 0: the stream's destination dial succeeded
 	frStream    = 0x08 // 0x08|OFF|LEN|FIN: stream id, [offset], [length], data
 
 	streamFin = 0x01
@@ -74,7 +75,7 @@ func parseFrames(b []byte, fn func(*frame) error) error {
 			slices.Reverse(f.ranges)
 		case f.typ == frReset:
 			f.id, f.val = r.varint(), r.varint()
-		case f.typ == frMaxStream:
+		case f.typ == frMaxStream, f.typ == frOpened:
 			f.id, f.val = r.varint(), r.varint()
 		case f.typ == frClose:
 			f.val = r.varint()

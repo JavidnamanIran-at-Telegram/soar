@@ -159,6 +159,7 @@ type pendingQuery struct {
 	seq      uint64 // per-path send order
 	scout    bool   // carries no data: a hello or a probe of an unverified path
 	errRcode int    // an error answer arrived (-1: none); it may be forged, so we keep waiting
+	errTC    bool   // that answer was truncated
 }
 
 type clientSession struct {
@@ -500,6 +501,9 @@ func (c *Client) expireLocked(now time.Time) {
 			continue
 		}
 		q.expired = true
+		if q.errTC {
+			q.p.limitClass = max(0, q.p.limitClass-4) // answers this size get truncated here
+		}
 		c.failLocked(q, now, q.errRcode == rcodeRefused)
 	}
 }
@@ -519,13 +523,6 @@ func (c *Client) checkLivenessLocked(now time.Time) {
 	if now.Sub(cs.unanswered) >= deadSessionAfter {
 		cs.close(errors.New("soar: no authenticated answers; session presumed lost"))
 	}
-}
-
-func minTime(a, b time.Time) time.Time {
-	if b.Before(a) {
-		return b
-	}
-	return a
 }
 
 // failLocked handles a query that got no usable answer.
@@ -811,28 +808,13 @@ func (c *Client) onAnswer(msg []byte) {
 		if late || q.errRcode >= 0 {
 			return
 		}
-		if a.tc {
-			p.limitClass = max(0, p.limitClass-4)
-		}
-		q.errRcode = a.rcode
+		// An unauthenticated answer may be injected (China's GFW forges them on UDP/53), so it
+		// never cuts the wait for the real one short or changes the path. It's only recorded:
+		// if no authenticated answer comes by the deadline, it says why the query failed.
+		q.errRcode, q.errTC = a.rcode, a.tc
 		if a.tc {
 			q.errRcode = rcodeServFail
 		}
-		// Over UDP an injector can answer first: China's GFW forges NOERROR answers with A
-		// records. Those never shorten the wait (the real answer follows, and failing fast
-		// would resend straight into rate limits). An explicit error or truncation is likelier
-		// real, so give the real answer only a short grace.
-		if a.rcode == rcodeOK && !a.tc {
-			return
-		}
-		grace := 200 * time.Millisecond
-		if p.hasRTT {
-			grace = max(p.srtt/2, 50*time.Millisecond)
-		}
-		if p.tcp != nil {
-			grace = 0
-		}
-		q.deadline = minTime(q.deadline, now.Add(grace))
 		return
 	}
 	if q.hello {

@@ -639,6 +639,14 @@ func (ss *srvSession) serveStream(st *stream) {
 	}()
 	up, err := ss.srv.cfg.Dial(ctx, "tcp", addr)
 	cancel()
+	if err == nil {
+		// Tell the client the destination is reachable: a caller that must know a connection
+		// is up before sending (kindling's connect phase) waits for this.
+		ss.mu.Lock()
+		ss.queueCtrl(ctrl{typ: frOpened, id: st.id})
+		ss.mu.Unlock()
+		ss.flush()
+	}
 	if err != nil {
 		ss.srv.cfg.Logger.Debug("dial failed", "addr", addr, "err", err)
 		ss.mu.Lock()
@@ -760,15 +768,18 @@ func isLocal(a netip.Addr) bool {
 	localAddrs.Lock()
 	defer localAddrs.Unlock()
 	if localAddrs.set == nil || time.Since(localAddrs.at) > time.Minute {
-		set := make(map[netip.Addr]bool)
+		// On failure keep the last good set; with none at all, fail closed.
 		if addrs, err := net.InterfaceAddrs(); err == nil {
+			set := make(map[netip.Addr]bool)
 			for _, ia := range addrs {
 				if pfx, err := netip.ParsePrefix(ia.String()); err == nil {
 					set[pfx.Addr().Unmap()] = true
 				}
 			}
+			localAddrs.set, localAddrs.at = set, time.Now()
+		} else if localAddrs.set == nil {
+			return true
 		}
-		localAddrs.set, localAddrs.at = set, time.Now()
 	}
 	return localAddrs.set[a]
 }

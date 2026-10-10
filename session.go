@@ -247,6 +247,11 @@ func (s *session) receive(pn uint64, frames []byte, now time.Time) (bool, error)
 			if st := s.peerStream(f.id); st != nil && f.val > st.smax {
 				st.smax = f.val
 			}
+		case f.typ == frOpened:
+			if st := s.streams[f.id]; st != nil && s.client && !st.openedClosed {
+				st.openedClosed = true
+				close(st.opened)
+			}
 		case f.typ == frClose:
 			s.closeLocked(fmt.Errorf("soar: session closed by peer (code %d)", f.val))
 		case f.typ&0xF8 == frStream:

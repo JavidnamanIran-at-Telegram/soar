@@ -281,7 +281,7 @@ func TestRoundTripper(t *testing.T) {
 	t.Cleanup(hs.Close)
 	c, _ := NewClient(Config{Zone: testZone, ServerKey: pub, Resolvers: []string{srv}})
 	defer c.Close()
-	rt, err := c.NewRoundTripper(context.Background(), "")
+	rt, err := c.NewRoundTripper(context.Background(), strings.TrimPrefix(hs.URL, "http://"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -920,5 +920,79 @@ func TestCloseFlushesNewestCacheSnapshot(t *testing.T) {
 	defer cache.mu.Unlock()
 	if n := len(cache.stores); n == 0 || !slices.Contains(cache.stores[n-1], good) {
 		t.Fatalf("after Close the cache holds %v, want the verified %s", cache.stores, good)
+	}
+}
+
+func TestNewRoundTripperFailsWhenDestinationUnreachable(t *testing.T) {
+	srv, pub := startServer(t)
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	dead := ln.Addr().String()
+	ln.Close() // nothing listens here: the server's dial is refused
+	c, _ := NewClient(Config{Zone: testZone, ServerKey: pub, Resolvers: []string{srv}})
+	defer c.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := c.NewRoundTripper(ctx, dead); err == nil {
+		t.Fatal("NewRoundTripper succeeded though the destination is unreachable")
+	}
+}
+
+// errInjector forwards to server but first answers every query with a forged error.
+func errInjector(t *testing.T, server string, rcode byte, tc bool) string {
+	front, _ := net.ListenPacket("udp", "127.0.0.1:0")
+	t.Cleanup(func() { front.Close() })
+	saddr, _ := net.ResolveUDPAddr("udp", server)
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, from, err := front.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			msg := append([]byte(nil), buf[:n]...)
+			if q, err := parseQuery(msg, zone{}); err == nil {
+				forged := appendAnswer(nil, q, rcode, nil)
+				if tc {
+					forged[2] |= 0x02
+				}
+				front.WriteTo(forged, from)
+			}
+			go func() {
+				back, _ := net.ListenPacket("udp", "127.0.0.1:0")
+				defer back.Close()
+				back.WriteTo(msg, saddr)
+				back.SetReadDeadline(time.Now().Add(3 * time.Second))
+				rb := make([]byte, 4096)
+				if m, _, err := back.ReadFrom(rb); err == nil {
+					front.WriteTo(rb[:m], from)
+				}
+			}()
+		}
+	}()
+	return front.LocalAddr().String()
+}
+
+func TestForgedErrorsDoNotCutQueriesShort(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		rcode byte
+		trunc bool
+	}{{"refused", rcodeRefused, false}, {"servfail", rcodeServFail, false}, {"truncated", rcodeOK, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, pub := startServer(t)
+			origin := startOrigin(t)
+			c, _ := NewClient(Config{Zone: testZone, ServerKey: pub, Resolvers: []string{errInjector(t, srv, tc.rcode, tc.trunc)}})
+			defer c.Close()
+			if d := fetch(t, c, origin, 50<<10); d > 5*time.Second {
+				t.Fatalf("50 KiB took %v under forged %s answers", d, tc.name)
+			}
+			c.mu.Lock()
+			p := c.paths[0]
+			qtype, limit := p.qtype, p.limitClass
+			c.mu.Unlock()
+			if qtype != typeTXT || limit != limitClasses-1 {
+				t.Fatalf("forged answers changed the path: qtype=%d limitClass=%d", qtype, limit)
+			}
+		})
 	}
 }
