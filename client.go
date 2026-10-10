@@ -167,6 +167,9 @@ type clientSession struct {
 	established bool
 	backlog     int
 	lastAuth    time.Time // last authenticated answer; guarded by Client.mu
+	// unanswered is when the first query since the last authenticated answer went out (zero if
+	// none has); guarded by Client.mu.
+	unanswered time.Time
 }
 
 func (cs *clientSession) isClosed() bool {
@@ -490,16 +493,15 @@ func (c *Client) expireLocked(now time.Time) {
 // is rate-limited, so this is what guarantees recovery when the server forgot us.
 const deadSessionAfter = 15 * time.Second
 
+// The clock runs from the first query sent since the last authenticated answer, not from the
+// answer itself, so an idle session isn't presumed lost the moment traffic resumes.
 func (c *Client) checkLivenessLocked(now time.Time) {
 	cs := c.sess
-	if cs == nil || !cs.established || now.Sub(cs.lastAuth) < deadSessionAfter {
+	if cs == nil || !cs.established || cs.unanswered.IsZero() {
 		return
 	}
-	for _, q := range c.pending {
-		if q.sess == cs && !q.hello && q.sent.After(cs.lastAuth) {
-			cs.close(errors.New("soar: no authenticated answers; session presumed lost"))
-			return
-		}
+	if now.Sub(cs.unanswered) >= deadSessionAfter {
+		cs.close(errors.New("soar: no authenticated answers; session presumed lost"))
 	}
 }
 
@@ -673,6 +675,9 @@ func (c *Client) sendDataLocked(cs *clientSession, p *path, now time.Time, allow
 	if !data {
 		timeout += c.cfg.Hold
 	}
+	if cs.unanswered.IsZero() {
+		cs.unanswered = now
+	}
 	c.sendLocked(p, &pendingQuery{p: p, sess: cs, pn: pn, probe: probe, scout: !p.verified}, payload, now, timeout)
 	// The tail of an upload (often a whole request) goes out twice, on another path if there is one.
 	if dup {
@@ -810,7 +815,7 @@ func (c *Client) onAnswer(msg []byte) {
 		return // forged or corrupt: keep waiting for the real answer
 	}
 	delete(c.pending, a.txn)
-	cs.lastAuth = now
+	cs.lastAuth, cs.unanswered = now, time.Time{}
 	p.maxAnswered = max(p.maxAnswered, q.seq+1)
 	dbg("cli recv pn=%d for up=%d plain=%x", pn, q.pn, plain)
 	held := time.Duration(plain[0]) * 10 * time.Millisecond

@@ -243,12 +243,17 @@ func (c *Conn) Read(p []byte) (int, error) {
 				st.rbuf = nil
 			}
 			st.rread += uint64(n)
-			// Re-advertise once half the window has been consumed.
+			// Re-advertise once half the window has been consumed. Limits only ever grow: the
+			// peer keeps whatever it was granted before.
 			grant := false
-			if limit := st.rread + st.rwin; limit-st.rmax >= st.rwin/2 && !st.rfin {
+			if limit := st.rread + st.rwin; limit > st.rmax && limit-st.rmax >= st.rwin/2 && !st.rfin {
 				st.rmax = limit
 				s.queueCtrl(ctrl{typ: frMaxStream, id: st.id, val: limit})
 				grant = true
+			}
+			// Wakeups coalesce: pass one on to any other blocked reader if more is readable.
+			if len(st.rbuf) > 0 || st.rfin && st.rread == st.rfinOff {
+				signal(st.readCh)
 			}
 			s.maybeRemove(st)
 			s.mu.Unlock()
@@ -258,6 +263,7 @@ func (c *Conn) Read(p []byte) (int, error) {
 			return n, nil
 		}
 		if st.rfin && st.rread == st.rfinOff {
+			signal(st.readCh)
 			s.maybeRemove(st)
 			s.mu.Unlock()
 			return 0, io.EOF
@@ -301,6 +307,9 @@ func (c *Conn) Write(p []byte) (int, error) {
 			st.sbuf = append(st.sbuf, p[written:written+n]...)
 			st.spending.add(start, start+uint64(n))
 			written += n
+			if written == len(p) && len(st.sbuf) < st.scap {
+				signal(st.writeCh) // room left: pass the wakeup on to another writer
+			}
 			s.mu.Unlock()
 			s.wake()
 			continue

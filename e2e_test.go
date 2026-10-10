@@ -419,3 +419,26 @@ func TestServerRestartUnsignedRecovery(t *testing.T) {
 	}
 	t.Fatal("session never presumed lost")
 }
+
+func TestIdleSessionSurvivesResume(t *testing.T) {
+	if testing.Short() {
+		t.Skip("idles past the liveness timeout")
+	}
+	srv, pub := startServer(t)
+	origin := startOrigin(t)
+	c, _ := NewClient(Config{Zone: testZone, ServerKey: pub, Resolvers: []string{srv}})
+	defer c.Close()
+	fetch(t, c, origin, 1000)
+	c.mu.Lock()
+	sess := c.sess
+	c.mu.Unlock()
+	time.Sleep(deadSessionAfter + 2*time.Second)
+	fetch(t, c, origin, 1000)
+	time.Sleep(200 * time.Millisecond)
+	c.mu.Lock()
+	same := c.sess == sess && !sess.isClosed()
+	c.mu.Unlock()
+	if !same {
+		t.Fatal("resuming after idle reset a healthy session")
+	}
+}

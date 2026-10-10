@@ -386,3 +386,45 @@ func TestClosedSessionAcceptsNoStreams(t *testing.T) {
 		t.Fatalf("closed session accepted a stream (open=%d)", open)
 	}
 }
+
+func TestSmallWindowNeverShrinksGrant(t *testing.T) {
+	s := newSession(true, streamConfig{StreamWindow: 8 << 10, SendBuffer: 1 << 16, MaxStreams: 4}, nil, nil)
+	st, _ := s.openStream()
+	c := &Conn{st: st}
+	if err := st.onData(0, make([]byte, 1000), false); err != nil {
+		t.Fatal(err)
+	}
+	c.Read(make([]byte, 1000))
+	if st.rmax < initialWindow {
+		t.Fatalf("rmax shrank to %d below the initial grant %d", st.rmax, initialWindow)
+	}
+	if err := st.onData(1000, make([]byte, initialWindow-1000), false); err != nil {
+		t.Fatalf("peer within its original allowance rejected: %v", err)
+	}
+}
+
+func TestConcurrentReadersAllSeeDataAndEOF(t *testing.T) {
+	s, st := newTestStream(t)
+	c := &Conn{st: st}
+	res := make(chan error, 2)
+	for range 2 {
+		go func() {
+			_, err := c.Read(make([]byte, 1))
+			res <- err
+		}()
+	}
+	time.Sleep(50 * time.Millisecond)
+	s.mu.Lock()
+	st.onData(0, []byte("ab"), true)
+	s.mu.Unlock()
+	for range 2 {
+		select {
+		case err := <-res:
+			if err != nil {
+				t.Fatalf("Read: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("a concurrent reader stayed blocked with data available")
+		}
+	}
+}
