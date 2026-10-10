@@ -236,7 +236,7 @@ func (s *session) receive(pn uint64, frames []byte, now time.Time) (bool, error)
 		case f.typ == frReset:
 			if st := s.streams[f.id]; st != nil {
 				// The peer stopped: abort our sending; keep data it already delivered readable.
-				if st.rfin {
+				if st.rfin && st.rcontig() == st.rfinOff {
 					st.sbuf, st.spending, st.sacked = nil, nil, nil
 					st.sfin, st.saborted = true, true
 					st.kill() // ends any pending dial (see serveStream); buffered data stays readable

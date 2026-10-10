@@ -580,3 +580,57 @@ func TestNameProbeRespectsShortNameLimit(t *testing.T) {
 		t.Fatalf("path promoted to %d-char names through a 101-char resolver", nameLen)
 	}
 }
+
+func TestRelayClosesDestinationWhenStreamDies(t *testing.T) {
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	defer ln.Close()
+	closed := make(chan struct{})
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		c.Read(make([]byte, 1)) // returns once the relay closes its end
+		close(closed)
+		c.Close()
+	}()
+	up, _ := net.Dial("tcp", ln.Addr().String())
+	s := newSession(false, streamConfig{StreamWindow: 1 << 16, SendBuffer: 1 << 16, MaxStreams: 4}, nil, nil)
+	s.mu.Lock()
+	st := s.peerStream(0)
+	st.onData(0, nil, true) // the client half-closed at once
+	s.mu.Unlock()
+	go relay(&Conn{st: st}, up)
+	time.Sleep(100 * time.Millisecond)
+	s.mu.Lock()
+	st.abort(ErrStreamReset)
+	s.mu.Unlock()
+	select {
+	case <-closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("destination left open after the stream died")
+	}
+}
+
+func TestResetAfterGappedFinDoesNotSpin(t *testing.T) {
+	s, st := newTestStream(t)
+	s.client = false
+	st.onData(10, []byte("tail"), true) // FIN beyond a gap at [0,10)
+	reset := ctrl{typ: frReset, id: st.id}.appendTo(nil)
+	s.mu.Lock()
+	s.receive(0, reset, time.Now())
+	s.mu.Unlock()
+	done := make(chan error, 1)
+	go func() {
+		_, err := (&Conn{st: st}).Read(make([]byte, 10))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Read returned data from a gap")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Read never returned after a reset with a gap before FIN")
+	}
+}

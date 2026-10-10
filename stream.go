@@ -273,7 +273,8 @@ func (c *Conn) Read(p []byte) (int, error) {
 			s.mu.Unlock()
 			return 0, err
 		}
-		if st.rclosed {
+		if st.rclosed || st.deadClosed {
+			// A dead stream with nothing left to read ends here rather than spinning on dead.
 			s.mu.Unlock()
 			return 0, net.ErrClosed
 		}
@@ -297,7 +298,7 @@ func (c *Conn) Write(p []byte) (int, error) {
 			s.mu.Unlock()
 			return written, err
 		}
-		if st.sfin {
+		if st.sfin || st.deadClosed {
 			s.mu.Unlock()
 			return written, net.ErrClosed
 		}

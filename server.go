@@ -498,6 +498,18 @@ func (ss *srvSession) serveStream(st *stream) {
 // any error (a reset stream, a closed session, a failed destination) closes the destination so
 // the opposite copy can't stay blocked on it.
 func relay(c *Conn, up net.Conn) {
+	// Close the destination as soon as the stream dies or the session ends: after a client FIN
+	// the upload copy is finished and nothing else would unblock a download copy reading it.
+	finished := make(chan struct{})
+	defer close(finished)
+	go func() {
+		select {
+		case <-c.st.dead:
+		case <-c.st.s.done:
+		case <-finished:
+		}
+		up.Close()
+	}()
 	done := make(chan struct{})
 	go func() {
 		if _, err := io.Copy(up, c); err != nil {
