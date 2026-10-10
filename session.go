@@ -343,7 +343,9 @@ func (s *session) onAck(rs rangeSet, now time.Time) {
 		return
 	}
 	for pn, p := range s.sent {
-		if pn+3 <= largest && now.Sub(p.at) > s.ackRTT*9/8 {
+		// RFC 9002's time threshold. Its packet threshold is left out on purpose: answers arrive
+		// over several resolvers, where three later acks is ordinary reordering, not loss.
+		if pn < largest && now.Sub(p.at) > s.ackRTT*9/8 {
 			s.declareLost(pn)
 		}
 	}

@@ -129,6 +129,12 @@ func (st *stream) onData(off uint64, data []byte, fin bool) error {
 		for _, n := range novel {
 			st.rooo[n.lo] = append([]byte(nil), data[n.lo-off:n.hi-off]...)
 			st.rgot.add(n.lo, n.hi)
+			st.coalesce(n.lo)
+		}
+		// Payload is bounded by the window; this bounds the bookkeeping. Real reordering leaves
+		// at most one gap per packet in flight, far fewer than this.
+		if len(st.rgot) > maxGaps {
+			return errors.New("soar: stream reassembly too fragmented")
 		}
 		return nil
 	}
@@ -155,6 +161,33 @@ func (st *stream) onData(off uint64, data []byte, fin bool) error {
 	}
 	signal(st.readCh)
 	return nil
+}
+
+const maxGaps = 1024
+
+// coalesce merges the stored pieces of the out-of-order span containing off into one buffer, so
+// storage is one allocation per gap rather than one per fragment. Caller holds s.mu.
+func (st *stream) coalesce(off uint64) {
+	for _, g := range st.rgot {
+		if off < g.lo || off >= g.hi {
+			continue
+		}
+		if d := st.rooo[g.lo]; uint64(len(d)) == g.hi-g.lo {
+			return // already one piece
+		}
+		buf := make([]byte, 0, g.hi-g.lo)
+		for o := g.lo; o < g.hi; {
+			d := st.rooo[o]
+			if len(d) == 0 {
+				return // pieces tile rgot; leave it be if that ever breaks
+			}
+			delete(st.rooo, o)
+			buf = append(buf, d...)
+			o += uint64(len(d))
+		}
+		st.rooo[g.lo] = buf
+		return
+	}
 }
 
 // onAcked records that the peer received [lo, hi) and maybe the FIN. Caller holds s.mu.

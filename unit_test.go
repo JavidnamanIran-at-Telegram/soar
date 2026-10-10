@@ -465,3 +465,28 @@ func TestByteBucket(t *testing.T) {
 		t.Fatal("bucket did not refill")
 	}
 }
+
+func TestFragmentedReassemblyIsBounded(t *testing.T) {
+	_, st := newTestStream(t)
+	st.rmax = 1 << 20
+	// Disjoint one-byte fragments, each leaving a gap: a hostile peer's pattern.
+	var err error
+	for i := uint64(1); i < 3*maxGaps && err == nil; i++ {
+		err = st.onData(2*i, []byte{1}, false)
+	}
+	if err == nil {
+		t.Fatal("unbounded fragmentation accepted")
+	}
+	// Adjacent fragments coalesce into one piece per gap.
+	_, st2 := newTestStream(t)
+	for i := uint64(100); i < 200; i++ {
+		st2.onData(i, []byte{byte(i)}, false)
+	}
+	if len(st2.rooo) != 1 || len(st2.rgot) != 1 || len(st2.rooo[100]) != 100 {
+		t.Fatalf("adjacent fragments kept as %d pieces over %d gaps", len(st2.rooo), len(st2.rgot))
+	}
+	st2.onData(0, make([]byte, 100), false)
+	if len(st2.rbuf) != 200 {
+		t.Fatalf("reassembled %d bytes, want 200", len(st2.rbuf))
+	}
+}

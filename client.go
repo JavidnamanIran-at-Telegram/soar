@@ -608,7 +608,7 @@ func (c *Client) fillLocked(now time.Time) {
 		if !need {
 			return
 		}
-		p := c.pickPathLocked(now)
+		p := c.pickPathLocked(now, nil)
 		if p == nil {
 			return
 		}
@@ -617,10 +617,13 @@ func (c *Client) fillLocked(now time.Time) {
 }
 
 // pickPathLocked returns the path with a free slot and the earliest expected answer.
-func (c *Client) pickPathLocked(now time.Time) *path {
+func (c *Client) pickPathLocked(now time.Time, exclude *path) *path {
 	var best *path
 	var bestScore float64
 	for _, p := range c.paths {
+		if p == exclude {
+			continue
+		}
 		if !p.usable(now) || float64(p.inflight) >= p.cwnd || (!p.verified && p.inflight > 0) {
 			continue
 		}
@@ -718,7 +721,12 @@ func (c *Client) sendDataLocked(cs *clientSession, p *path, now time.Time, allow
 	c.sendLocked(p, &pendingQuery{p: p, sess: cs, pn: pn, probe: probe, scout: !p.verified}, payload, now, timeout)
 	// The tail of an upload (often a whole request) goes out twice, on another path if there is one.
 	if dup {
-		if p2 := c.pickPathLocked(now); p2 != nil && p2.verified {
+		// A different resolver, so the copies don't share a failure; the same one if it's all we have.
+		p2 := c.pickPathLocked(now, p)
+		if p2 == nil || !p2.verified {
+			p2 = c.pickPathLocked(now, nil)
+		}
+		if p2 != nil && p2.verified {
 			cs.mu.Lock()
 			ok := cs.requeue(pkt)
 			cs.mu.Unlock()

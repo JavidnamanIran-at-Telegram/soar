@@ -139,10 +139,22 @@ type heldQuery struct {
 	limit    int
 	at       time.Time
 	answered bool
+	timer    *time.Timer // its hold expiry; stopped when answered early
+}
+
+// finish marks hq answered and stops its hold timer. Caller holds ss.mu.
+func (hq *heldQuery) finish() {
+	hq.answered = true
+	if hq.timer != nil {
+		hq.timer.Stop()
+	}
 }
 
 // Serve runs a server on pc until ctx ends.
 func Serve(ctx context.Context, pc net.PacketConn, cfg ServerConfig) error {
+	// Workers, sweeps and sessions end whenever Serve returns, not only when the caller cancels.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	cfg.setDefaults()
 	if len(cfg.PrivateKey) != ed25519.PrivateKeySize {
 		return errors.New("soar: server needs an Ed25519 private key")
@@ -369,7 +381,7 @@ func (s *Server) handshake(j helloJob) {
 	ss.onLostUnknown = func(up uint64) {
 		for i, h := range ss.held {
 			if h.upPN == up {
-				h.answered = true
+				h.finish()
 				ss.held = append(ss.held[:i], ss.held[i+1:]...)
 				break
 			}
@@ -435,12 +447,17 @@ func (ss *srvSession) onQuery(q *query, addr net.Addr, p []byte) {
 		return
 	}
 	dbg("srv q pn=%d plain=%x", pn, plain)
-	ss.lastSeen = now
-	ss.used.Store(true)
 	limitClass, holdClass := int(plain[0]&0x0F), int(plain[0]>>4)
 	ss.rxData = false
-	if _, err := ss.receive(pn, plain[1:], now); err != nil {
+	fresh, err := ss.receive(pn, plain[1:], now)
+	if err != nil {
 		ss.closeLocked(err)
+	}
+	// Only a new packet is activity: a replayed one mustn't keep the session alive or mark a
+	// hello-only session used. (Duplicates, e.g. resolver retries, are still answered.)
+	if fresh {
+		ss.lastSeen = now
+		ss.used.Store(true)
 	}
 	hq := &heldQuery{q: q, addr: addr, upPN: pn, limit: min(512+48*limitClass, q.edns), at: now}
 	hold := min(time.Duration(holdClass)*100*time.Millisecond, ss.srv.cfg.MaxHold)
@@ -451,7 +468,7 @@ func (ss *srvSession) onQuery(q *query, addr net.Addr, p []byte) {
 		out = append(out, ss.answerLocked(hq, now))
 	} else {
 		ss.held = append(ss.held, hq)
-		time.AfterFunc(hold, func() { ss.expire(hq) })
+		hq.timer = time.AfterFunc(hold, func() { ss.expire(hq) })
 		// Bound held queries per session; answer the oldest.
 		for len(ss.held) > 128 {
 			out = append(out, ss.answerLocked(ss.held[0], now))
@@ -540,7 +557,7 @@ func (ss *srvSession) answerLocked(hq *heldQuery, now time.Time) sendItem {
 }
 
 func (ss *srvSession) answerPktLocked(hq *heldQuery, now time.Time) (sendItem, *sentPkt) {
-	hq.answered = true
+	hq.finish()
 	for i, h := range ss.held {
 		if h == hq {
 			ss.held = append(ss.held[:i], ss.held[i+1:]...)
@@ -568,7 +585,7 @@ func (ss *srvSession) answerPktLocked(hq *heldQuery, now time.Time) (sendItem, *
 
 // emptyAnswerLocked answers hq with a packet carrying no frames.
 func (ss *srvSession) emptyAnswerLocked(hq *heldQuery, now time.Time) sendItem {
-	hq.answered = true
+	hq.finish()
 	pn := ss.nextPN
 	ss.nextPN++
 	plain := make([]byte, 2+minPlain)
