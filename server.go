@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -87,8 +88,8 @@ type Server struct {
 	hellos   map[[pubLen]byte]*helloEntry
 	streams  atomic.Int64
 
-	signTokens  tokenBucket
-	helloTokens tokenBucket
+	signTokens tokenBucket
+	helloQ     chan helloJob
 }
 
 type helloEntry struct {
@@ -128,13 +129,16 @@ func Serve(ctx context.Context, pc net.PacketConn, cfg ServerConfig) error {
 		return err
 	}
 	s := &Server{cfg: cfg, z: z, pc: pc, ctx: ctx, signTokens: tokenBucket{rate: 200, tokens: 200, last: time.Now()},
-		helloTokens: tokenBucket{rate: 500, tokens: 500, last: time.Now()},
-		sessions:    make(map[uint16]*srvSession), hellos: make(map[[pubLen]byte]*helloEntry)}
+		helloQ:   make(chan helloJob, 1024),
+		sessions: make(map[uint16]*srvSession), hellos: make(map[[pubLen]byte]*helloEntry)}
 	go func() {
 		<-ctx.Done()
 		pc.Close()
 	}()
 	go s.sweep()
+	for range max(2, runtime.GOMAXPROCS(0)) {
+		go s.helloWorker()
+	}
 	buf := make([]byte, 4096)
 	for {
 		n, addr, err := pc.ReadFrom(buf)
@@ -221,41 +225,87 @@ func (b *tokenBucket) take(now time.Time) bool {
 	return true
 }
 
+type helloJob struct {
+	q    *query
+	addr net.Addr
+	key  [pubLen]byte
+}
+
+// hello answers a retransmitted hello from the cache at once and hands a new one to the
+// handshake workers. The crypto (key generation, ECDH, signature) runs there, outside s.mu, so a
+// flood of unique hellos can neither block the receive loop nor stall established sessions; when
+// the workers fall behind, the queue drops new hellos (clients retry) instead of growing.
 func (s *Server) hello(q *query, addr net.Addr, eph []byte) {
 	if len(eph) < pubLen {
 		s.reply(q, addr, rcodeNXDomain, nil)
 		return
 	}
-	var key [pubLen]byte
-	copy(key[:], eph)
+	j := helloJob{q: q, addr: addr}
+	copy(j.key[:], eph)
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	h := s.hellos[j.key]
+	s.mu.Unlock()
 	// Resolvers retry and clients send the hello down several paths: answer each copy alike.
-	if h := s.hellos[key]; h != nil {
+	if h != nil {
 		s.reply(q, addr, rcodeOK, h.reply)
 		return
 	}
-	// A new handshake costs a key generation, an ECDH and a signature on the receive loop: rate-
-	// limit them so a flood of unique hellos can't starve established sessions.
-	if !s.helloTokens.take(time.Now()) {
+	select {
+	case s.helloQ <- j:
+	default:
 		s.reply(q, addr, rcodeRefused, nil)
-		return
 	}
-	if len(s.sessions) >= s.cfg.MaxSessions && !s.evictUnusedLocked() {
-		s.reply(q, addr, rcodeRefused, nil)
-		return
+}
+
+func (s *Server) helloWorker() {
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case j := <-s.helloQ:
+			s.handshake(j)
+		}
 	}
+}
+
+func (s *Server) handshake(j helloJob) {
+	q, addr := j.q, j.addr
 	var sid uint16
-	for sid == 0 || s.sessions[sid] != nil {
+	var reply []byte
+	var up, down *packetCipher
+	for attempt := 0; ; attempt++ {
 		var b [2]byte
 		rand.Read(b[:])
-		sid = binary.BigEndian.Uint16(b[:])
+		if sid = binary.BigEndian.Uint16(b[:]); sid == 0 {
+			continue
+		}
+		var err error
+		if reply, up, down, err = serverHello(s.cfg.PrivateKey, j.key[:], sid); err != nil {
+			s.reply(q, addr, rcodeNXDomain, nil)
+			return
+		}
+		s.mu.Lock()
+		if h := s.hellos[j.key]; h != nil { // another worker finished this hello first
+			s.mu.Unlock()
+			s.reply(q, addr, rcodeOK, h.reply)
+			return
+		}
+		if len(s.sessions) >= s.cfg.MaxSessions && !s.evictUnusedLocked() {
+			s.mu.Unlock()
+			s.reply(q, addr, rcodeRefused, nil)
+			return
+		}
+		if s.sessions[sid] == nil {
+			break // s.mu held
+		}
+		s.mu.Unlock() // the sid is taken (the transcript covers it): pick another
+		if attempt > 8 {
+			s.reply(q, addr, rcodeRefused, nil)
+			return
+		}
 	}
-	reply, up, down, err := serverHello(s.cfg.PrivateKey, key[:], sid)
-	if err != nil {
-		s.reply(q, addr, rcodeNXDomain, nil)
-		return
-	}
+	defer s.mu.Unlock()
+	key := j.key
 	cfg := streamConfig{StreamWindow: s.cfg.StreamWindow, SendBuffer: s.cfg.SendBuffer, MaxStreams: s.cfg.MaxStreams}
 	ss := &srvSession{session: newSession(false, cfg, down, up), srv: s, sid: sid, lastSeen: time.Now(), created: time.Now()}
 	ss.wakeFn = ss.flush

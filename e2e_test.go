@@ -689,16 +689,32 @@ func countingForwarder(t *testing.T, server string) (string, *atomic.Int64) {
 	return front.LocalAddr().String(), &n
 }
 
-func TestHelloFloodIsRateLimited(t *testing.T) {
-	s := &Server{helloTokens: tokenBucket{rate: 500, tokens: 500, last: time.Now()}}
-	allowed := 0
-	now := time.Now()
-	for range 5000 {
-		if s.helloTokens.take(now) {
-			allowed++
+func TestHelloFloodDoesNotStallSessions(t *testing.T) {
+	srv, pub := startServer(t)
+	origin := startOrigin(t)
+	c, _ := NewClient(Config{Zone: testZone, ServerKey: pub, Resolvers: []string{srv}})
+	defer c.Close()
+	fetch(t, c, origin, 1000)
+	z, _ := parseZone(testZone)
+	flood, _ := net.ListenPacket("udp", "127.0.0.1:0")
+	defer flood.Close()
+	saddr, _ := net.ResolveUDPAddr("udp", srv)
+	stop := make(chan struct{})
+	go func() {
+		eph := make([]byte, 2+pubLen)
+		for i := uint16(1); ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			rand.Read(eph[2:])
+			flood.WriteTo(appendQuery(nil, i, eph, z, typeTXT, 1232), saddr)
 		}
-	}
-	if allowed > 500 {
-		t.Fatalf("%d hellos admitted in one instant, want at most 500", allowed)
+	}()
+	defer close(stop)
+	time.Sleep(200 * time.Millisecond)
+	if d := fetch(t, c, origin, 50<<10); d > 10*time.Second {
+		t.Fatalf("50 KiB took %v during a hello flood", d)
 	}
 }
