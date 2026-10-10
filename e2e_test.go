@@ -9,6 +9,8 @@ import (
 	"io"
 	mrand "math/rand/v2"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -261,5 +263,28 @@ func TestPublicOnlyRefusesOwnAddresses(t *testing.T) {
 		if err := PublicOnly("tcp", addr, nil); err == nil {
 			t.Errorf("own address %s allowed", addr)
 		}
+	}
+}
+
+func TestRoundTripper(t *testing.T) {
+	srv, pub := startServer(t)
+	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(pattern(30000))
+	}))
+	t.Cleanup(hs.Close)
+	c, _ := NewClient(Config{Zone: testZone, ServerKey: pub, Resolvers: []string{srv}})
+	defer c.Close()
+	rt, err := c.NewRoundTripper(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := (&http.Client{Transport: rt, Timeout: 30 * time.Second}).Get(hs.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !bytes.Equal(body, pattern(30000)) {
+		t.Fatalf("body %d bytes", len(body))
 	}
 }
