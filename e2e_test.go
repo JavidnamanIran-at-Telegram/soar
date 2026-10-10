@@ -634,3 +634,71 @@ func TestResetAfterGappedFinDoesNotSpin(t *testing.T) {
 		t.Fatal("Read never returned after a reset with a gap before FIN")
 	}
 }
+
+func TestIdleClientStopsPolling(t *testing.T) {
+	srv, pub := startServer(t)
+	origin := startOrigin(t)
+	fwd, count := countingForwarder(t, srv)
+	c, _ := NewClient(Config{Zone: testZone, ServerKey: pub, Resolvers: []string{fwd}})
+	defer c.Close()
+	fetch(t, c, origin, 2000)
+	time.Sleep(2 * time.Second) // let acks and closes settle
+	before := count.Load()
+	time.Sleep(3 * time.Second)
+	if n := count.Load() - before; n > 0 {
+		t.Fatalf("idle client sent %d queries in 3s", n)
+	}
+}
+
+func countingForwarder(t *testing.T, server string) (string, *atomic.Int64) {
+	var n atomic.Int64
+	front, _ := net.ListenPacket("udp", "127.0.0.1:0")
+	t.Cleanup(func() { front.Close() })
+	saddr, _ := net.ResolveUDPAddr("udp", server)
+	back, _ := net.ListenPacket("udp", "127.0.0.1:0")
+	t.Cleanup(func() { back.Close() })
+	var mu sync.Mutex
+	var client net.Addr
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			m, from, err := front.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			n.Add(1)
+			mu.Lock()
+			client = from
+			mu.Unlock()
+			back.WriteTo(buf[:m], saddr)
+		}
+	}()
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			m, _, err := back.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			to := client
+			mu.Unlock()
+			front.WriteTo(buf[:m], to)
+		}
+	}()
+	return front.LocalAddr().String(), &n
+}
+
+func TestHelloFloodIsRateLimited(t *testing.T) {
+	s := &Server{helloTokens: tokenBucket{rate: 500, tokens: 500, last: time.Now()}}
+	allowed := 0
+	now := time.Now()
+	for range 5000 {
+		if s.helloTokens.take(now) {
+			allowed++
+		}
+	}
+	if allowed > 500 {
+		t.Fatalf("%d hellos admitted in one instant, want at most 500", allowed)
+	}
+}

@@ -87,7 +87,8 @@ type Server struct {
 	hellos   map[[pubLen]byte]*helloEntry
 	streams  atomic.Int64
 
-	signTokens tokenBucket
+	signTokens  tokenBucket
+	helloTokens tokenBucket
 }
 
 type helloEntry struct {
@@ -127,7 +128,8 @@ func Serve(ctx context.Context, pc net.PacketConn, cfg ServerConfig) error {
 		return err
 	}
 	s := &Server{cfg: cfg, z: z, pc: pc, ctx: ctx, signTokens: tokenBucket{rate: 200, tokens: 200, last: time.Now()},
-		sessions: make(map[uint16]*srvSession), hellos: make(map[[pubLen]byte]*helloEntry)}
+		helloTokens: tokenBucket{rate: 500, tokens: 500, last: time.Now()},
+		sessions:    make(map[uint16]*srvSession), hellos: make(map[[pubLen]byte]*helloEntry)}
 	go func() {
 		<-ctx.Done()
 		pc.Close()
@@ -231,6 +233,12 @@ func (s *Server) hello(q *query, addr net.Addr, eph []byte) {
 	// Resolvers retry and clients send the hello down several paths: answer each copy alike.
 	if h := s.hellos[key]; h != nil {
 		s.reply(q, addr, rcodeOK, h.reply)
+		return
+	}
+	// A new handshake costs a key generation, an ECDH and a signature on the receive loop: rate-
+	// limit them so a flood of unique hellos can't starve established sessions.
+	if !s.helloTokens.take(time.Now()) {
+		s.reply(q, addr, rcodeRefused, nil)
 		return
 	}
 	if len(s.sessions) >= s.cfg.MaxSessions && !s.evictUnusedLocked() {

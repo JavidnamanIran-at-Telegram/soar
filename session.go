@@ -210,13 +210,11 @@ func (s *session) receive(pn uint64, frames []byte, now time.Time) (bool, error)
 	if s.largestRecv > replayWindow {
 		s.recvd.trimBelow(s.largestRecv - replayWindow)
 	}
-	if s.client {
-		s.toAck.add(pn, pn+1)
-		if len(s.toAck) > maxAckRanges {
-			s.toAck = s.toAck[len(s.toAck)-maxAckRanges:]
-		}
-	}
+	eliciting := false
 	err := parseFrames(frames, func(f *frame) error {
+		if f.typ != frAck && f.typ != frLost {
+			eliciting = true
+		}
 		if f.typ != frAck && f.typ != frLost && f.typ != frPing {
 			s.rxData = true
 		}
@@ -263,6 +261,14 @@ func (s *session) receive(pn uint64, frames []byte, now time.Time) (bool, error)
 		}
 		return nil
 	})
+	// Ack only packets that carry something (RFC 9000 §13.2.1): acking an empty answer to an idle
+	// poll would need a query, whose empty answer would need an ack, and polling would never stop.
+	if s.client && eliciting {
+		s.toAck.add(pn, pn+1)
+		if len(s.toAck) > maxAckRanges {
+			s.toAck = s.toAck[len(s.toAck)-maxAckRanges:]
+		}
+	}
 	return true, err
 }
 
