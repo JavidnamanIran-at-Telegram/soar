@@ -239,9 +239,12 @@ func TestPublicOnly(t *testing.T) {
 	for addr, ok := range map[string]bool{
 		"127.0.0.1:80": false, "10.1.2.3:443": false, "169.254.169.254:80": false,
 		"100.64.0.1:80": false, "[::1]:443": false, "[fd00::1]:80": false, "0.0.0.0:80": false,
+		"0.1.2.3:80": false, "[::ffff:127.0.0.1]:80": false, "[64:ff9b::7f00:1]:80": false,
+		"[64:ff9b::a9fe:a9fe]:80": false, "[2002:7f00:1::]:80": false, "[2001:0:1::1]:80": false,
+		"[::127.0.0.1]:80": false, "[64:ff9b::808:808]:443": true, "[2002:808:808::]:443": true,
 		"8.8.8.8:443": true, "[2606:4700::1111]:443": true,
 	} {
-		if err := publicOnly("tcp", addr, nil); (err == nil) != ok {
+		if err := PublicOnly("tcp", addr, nil); (err == nil) != ok {
 			t.Errorf("%s: allowed=%v, want %v", addr, err == nil, ok)
 		}
 	}

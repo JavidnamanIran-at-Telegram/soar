@@ -42,7 +42,7 @@ type ServerConfig struct {
 
 func (c *ServerConfig) setDefaults() {
 	if c.Dial == nil {
-		d := &net.Dialer{Timeout: 15 * time.Second, Control: publicOnly}
+		d := &net.Dialer{Timeout: 15 * time.Second, Control: PublicOnly}
 		c.Dial = d.DialContext
 	}
 	if c.MaxSessions <= 0 || c.MaxSessions > 1<<15 {
@@ -91,6 +91,7 @@ type Server struct {
 type helloEntry struct {
 	reply []byte
 	at    time.Time
+	sid   uint16
 }
 
 type srvSession struct {
@@ -240,7 +241,8 @@ func (s *Server) hello(q *query, addr net.Addr, eph []byte) {
 		}
 	}
 	s.sessions[sid] = ss
-	s.hellos[key] = &helloEntry{reply: reply, at: time.Now()}
+	// Bounded by MaxSessions: entries go with their session (see evictUnusedLocked and sweep).
+	s.hellos[key] = &helloEntry{reply: reply, at: time.Now(), sid: sid}
 	s.reply(q, addr, rcodeOK, reply)
 }
 
@@ -257,8 +259,19 @@ func (s *Server) evictUnusedLocked() bool {
 		return false
 	}
 	delete(s.sessions, victim.sid)
+	s.forgetHelloLocked(victim.sid)
 	go victim.close(ErrClosed)
 	return true
+}
+
+// forgetHelloLocked drops the cached hello reply for sid. Caller holds s.mu.
+func (s *Server) forgetHelloLocked(sid uint16) {
+	for k, h := range s.hellos {
+		if h.sid == sid {
+			delete(s.hellos, k)
+			return
+		}
+	}
 }
 
 // onQuery handles a data query: it applies the client's packet, then answers now or holds the
@@ -444,36 +457,56 @@ func relay(c *Conn, up net.Conn) {
 	c.Close()
 }
 
-// publicOnly refuses connections to loopback, private, link-local and other non-public
-// addresses: anyone holding the (public) server key can open streams, and the server must not
-// become a way into its own network. It checks the address actually dialed, after resolution.
-func publicOnly(network, address string, _ syscall.RawConn) error {
+// PublicOnly is a net.Dialer Control function that refuses non-public destinations: loopback,
+// private, link-local, CGNAT, reserved, and IPv6 forms that embed one (NAT64, 6to4, Teredo,
+// IPv4-compatible). Anyone holding the (public) server key can open streams, so the server must
+// not become a way into its own network. It checks the address actually dialed, after
+// resolution, so DNS rebinding can't get around it. The default dialer uses it; a custom
+// ServerConfig.Dial should too.
+func PublicOnly(network, address string, _ syscall.RawConn) error {
 	ap, err := netip.ParseAddrPort(address)
 	if err != nil {
 		return err
 	}
-	a := ap.Addr().Unmap()
-	if !a.IsGlobalUnicast() || a.IsPrivate() || isSpecial(a) {
+	if a := ap.Addr(); !isPublic(a) {
 		return fmt.Errorf("seep: destination %s is not public", a)
 	}
 	return nil
 }
 
-var specialPrefixes = []netip.Prefix{
+var nonPublic = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),      // "this network"
 	netip.MustParsePrefix("100.64.0.0/10"),  // CGNAT
 	netip.MustParsePrefix("192.0.0.0/24"),   // IETF protocol assignments
 	netip.MustParsePrefix("198.18.0.0/15"),  // benchmarking
 	netip.MustParsePrefix("240.0.0.0/4"),    // reserved
+	netip.MustParsePrefix("::/96"),          // IPv4-compatible (deprecated)
 	netip.MustParsePrefix("64:ff9b:1::/48"), // local-use NAT64
+	netip.MustParsePrefix("2001::/32"),      // Teredo: tunnels to arbitrary IPv4
+	netip.MustParsePrefix("fec0::/10"),      // site-local (deprecated)
 }
 
-func isSpecial(a netip.Addr) bool {
-	for _, p := range specialPrefixes {
+func isPublic(a netip.Addr) bool {
+	a = a.Unmap()
+	if !a.IsGlobalUnicast() || a.IsPrivate() {
+		return false
+	}
+	for _, p := range nonPublic {
 		if p.Contains(a) {
-			return true
+			return false
 		}
 	}
-	return false
+	// NAT64 and 6to4 embed an IPv4 destination: judge that.
+	if a.Is6() {
+		b := a.As16()
+		if netip.MustParsePrefix("64:ff9b::/96").Contains(a) {
+			return isPublic(netip.AddrFrom4([4]byte(b[12:16])))
+		}
+		if netip.MustParsePrefix("2002::/16").Contains(a) {
+			return isPublic(netip.AddrFrom4([4]byte(b[2:6])))
+		}
+	}
+	return true
 }
 
 // readAddr reads a varint length and that many address bytes.
@@ -509,7 +542,7 @@ func (s *Server) sweep() {
 		case now := <-t.C:
 			s.mu.Lock()
 			for k, h := range s.hellos {
-				if now.Sub(h.at) > time.Minute {
+				if now.Sub(h.at) > time.Minute || s.sessions[h.sid] == nil {
 					delete(s.hellos, k)
 				}
 			}

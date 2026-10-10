@@ -123,6 +123,9 @@ func (st *stream) onData(off uint64, data []byte, fin bool) error {
 		g := st.rgot[0]
 		for o := g.lo; o < g.hi; {
 			d := st.rooo[o]
+			if len(d) == 0 {
+				break // pieces tile rgot; never spin if that invariant breaks
+			}
 			delete(st.rooo, o)
 			if e := o + uint64(len(d)); e > c {
 				st.rbuf = append(st.rbuf, d[max(c, o)-o:]...)

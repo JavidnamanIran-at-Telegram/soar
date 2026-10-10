@@ -56,7 +56,7 @@ func main() {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
-	dialer := &net.Dialer{}
+	dialer := &net.Dialer{Control: seep.PublicOnly}
 	allowed := strings.Split(*ports, ",")
 	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		_, port, err := net.SplitHostPort(addr)

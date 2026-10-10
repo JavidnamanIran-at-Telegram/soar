@@ -145,6 +145,7 @@ type pendingQuery struct {
 	expired  bool
 	seq      uint64 // per-path send order
 	scout    bool   // carries no data: a hello or a probe of an unverified path
+	errRcode int    // an error answer arrived (-1: none); it may be forged, so we keep waiting
 }
 
 type clientSession struct {
@@ -462,8 +463,20 @@ func (c *Client) expireLocked(now time.Time) {
 			continue
 		}
 		q.expired = true
-		c.failLocked(q, now, false)
+		if q.errRcode == rcodeNXDomain && q.sess != nil && q.sess.established && !q.hello {
+			if q.sess.nx++; q.sess.nx >= nxdomainToDead {
+				q.sess.close(errors.New("seep: server lost the session"))
+			}
+		}
+		c.failLocked(q, now, q.errRcode == rcodeRefused)
 	}
+}
+
+func minTime(a, b time.Time) time.Time {
+	if b.Before(a) {
+		return b
+	}
+	return a
 }
 
 // failLocked handles a query that got no usable answer.
@@ -633,6 +646,7 @@ func (c *Client) sendDataLocked(cs *clientSession, p *path, now time.Time, allow
 
 func (c *Client) sendLocked(p *path, q *pendingQuery, payload []byte, now time.Time, timeout time.Duration) {
 	q.txn = c.newTxnLocked()
+	q.errRcode = -1
 	msg := appendQuery(make([]byte, 0, 300), q.txn, payload, c.z, 1232)
 	end, err := skipName(msg, hdrLen)
 	if err != nil {
@@ -692,20 +706,32 @@ func (c *Client) onAnswer(msg []byte) {
 	p := q.p
 	late := q.expired
 	p.maxAnswered = max(p.maxAnswered, q.seq+1)
-	if a.tc {
-		p.limitClass = max(0, p.limitClass-4)
-	}
 	if a.tc || a.rcode != rcodeOK || !a.hasTXT {
-		dbg("cli fail tc=%v rcode=%d txt=%v hello=%v", a.tc, a.rcode, a.hasTXT, q.hello)
-		if a.rcode == rcodeNXDomain && q.sess != nil && q.sess.established && !q.hello {
-			if q.sess.nx++; q.sess.nx >= nxdomainToDead {
-				q.sess.close(errors.New("seep: server lost the session"))
-			}
+		if late || q.errRcode >= 0 {
+			return
 		}
-		if !late {
-			delete(c.pending, a.txn)
-			c.failLocked(q, now, a.rcode == rcodeRefused)
+		if a.tc {
+			p.limitClass = max(0, p.limitClass-4)
 		}
+		q.errRcode = a.rcode
+		if a.tc {
+			q.errRcode = rcodeServFail
+		}
+		// Over UDP an injector can answer first: China's GFW forges NOERROR answers with A
+		// records. Those never shorten the wait (the real answer follows, and failing fast
+		// would resend straight into rate limits). An explicit error or truncation is likelier
+		// real, so give the real answer only a short grace.
+		if a.rcode == rcodeOK && !a.tc {
+			return
+		}
+		grace := 200 * time.Millisecond
+		if p.hasRTT {
+			grace = max(p.srtt/2, 50*time.Millisecond)
+		}
+		if p.tcp != nil {
+			grace = 0
+		}
+		q.deadline = minTime(q.deadline, now.Add(grace))
 		return
 	}
 	if q.hello {
