@@ -1,16 +1,16 @@
 package seep
 
 import (
-	"fmt"
-	"os"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"sync"
 	"time"
 )
@@ -80,8 +80,8 @@ type helloEntry struct {
 
 type srvSession struct {
 	*session
-	srv      *Server
-	sid      uint16
+	srv       *Server
+	sid       uint16
 	held      []*heldQuery // guarded by session.mu
 	lastSeen  time.Time    // guarded by session.mu
 	abandoned rangeSet     // upstream pns the client gave up on; guarded by session.mu

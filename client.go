@@ -1,7 +1,6 @@
 package seep
 
 import (
-	"fmt"
 	"bytes"
 	"context"
 	"crypto/ecdh"
@@ -9,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"sync"
@@ -118,10 +118,10 @@ type path struct {
 	limitClass int
 	lastHello  time.Time
 
-	verified     bool // has answered at least once
-	lastSuccess  time.Time
-	nextSeq      uint64
-	maxAnswered  uint64 // highest seq answered + 1
+	verified    bool // has answered at least once
+	lastSuccess time.Time
+	nextSeq     uint64
+	maxAnswered uint64 // highest seq answered + 1
 }
 
 type pendingQuery struct {
