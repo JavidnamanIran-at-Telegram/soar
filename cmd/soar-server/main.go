@@ -1,7 +1,7 @@
-// Command seep-server is the authoritative name server for a seep tunnel zone.
+// Command soar-server is the authoritative name server for a soar tunnel zone.
 //
-//	seep-server keygen                      # prints a private and public key
-//	seep-server -zone t.example.com -key-file key -listen :53
+//	soar-server keygen                      # prints a private and public key
+//	soar-server -zone t.example.com -key-file key -listen :53
 package main
 
 import (
@@ -19,7 +19,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/getlantern/seep"
+	"github.com/getlantern/soar"
 )
 
 func main() {
@@ -57,7 +57,7 @@ func main() {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
-	dialer := &net.Dialer{Control: seep.PublicOnly}
+	dialer := &net.Dialer{Control: soar.PublicOnly}
 	if *private {
 		dialer.Control = nil
 	}
@@ -82,12 +82,12 @@ func main() {
 	priv := ed25519.NewKeyFromSeed(seed)
 	log.Info("serving", "zone", *zone, "listen", pc.LocalAddr(),
 		"public_key", base64.StdEncoding.EncodeToString(priv.Public().(ed25519.PublicKey)))
-	if err := seep.Serve(ctx, pc, seep.ServerConfig{Zone: *zone, PrivateKey: priv, Dial: dial, Logger: log}); err != nil {
+	if err := soar.Serve(ctx, pc, soar.ServerConfig{Zone: *zone, PrivateKey: priv, Dial: dial, Logger: log}); err != nil {
 		fatal(err)
 	}
 }
 
 func fatal(err error) {
-	fmt.Fprintln(os.Stderr, "seep-server:", err)
+	fmt.Fprintln(os.Stderr, "soar-server:", err)
 	os.Exit(1)
 }

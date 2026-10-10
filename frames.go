@@ -1,4 +1,4 @@
-package seep
+package soar
 
 import (
 	"errors"
@@ -23,7 +23,7 @@ const (
 	maxLostPerPkt = 32
 )
 
-var errFrame = errors.New("seep: malformed frame")
+var errFrame = errors.New("soar: malformed frame")
 
 type frame struct {
 	typ    byte

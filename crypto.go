@@ -1,4 +1,4 @@
-package seep
+package soar
 
 import (
 	"crypto/ecdh"
@@ -23,13 +23,13 @@ const (
 	// helloReplyLen is serverEph || sid || signature.
 	helloReplyLen = pubLen + 2 + sigLen
 
-	sigContext = "seep v1 hello"
-	kdfLabel   = "seep v1 "
+	sigContext = "soar v1 hello"
+	kdfLabel   = "soar v1 "
 )
 
 var (
-	errAuth         = errors.New("seep: packet authentication failed")
-	errBadSignature = errors.New("seep: server signature verification failed")
+	errAuth         = errors.New("soar: packet authentication failed")
+	errBadSignature = errors.New("soar: server signature verification failed")
 )
 
 // packetCipher seals one direction's packets: ChaCha20-Poly1305 (RFC 8439) with the tag truncated

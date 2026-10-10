@@ -1,4 +1,4 @@
-package seep
+package soar
 
 // span is the half-open interval [lo, hi).
 type span struct{ lo, hi uint64 }

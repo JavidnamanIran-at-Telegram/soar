@@ -1,4 +1,4 @@
-package seep
+package soar
 
 import (
 	"bytes"
@@ -30,7 +30,7 @@ const (
 	b32 = "abcdefghijklmnopqrstuvwxyz234567"
 )
 
-var errDNS = errors.New("seep: malformed DNS message")
+var errDNS = errors.New("soar: malformed DNS message")
 
 var b32Rev = func() (t [256]byte) {
 	for i := range t {
@@ -92,12 +92,12 @@ type zone struct {
 func parseZone(s string) (zone, error) {
 	s = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(s), "."))
 	if s == "" {
-		return zone{}, errors.New("seep: empty zone")
+		return zone{}, errors.New("soar: empty zone")
 	}
 	var w []byte
 	for _, l := range strings.Split(s, ".") {
 		if l == "" || len(l) > maxLabel {
-			return zone{}, errors.New("seep: bad zone")
+			return zone{}, errors.New("soar: bad zone")
 		}
 		w = append(w, byte(len(l)))
 		w = append(w, l...)

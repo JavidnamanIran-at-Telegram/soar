@@ -1,4 +1,4 @@
-package seep
+package soar
 
 import (
 	"errors"
@@ -10,8 +10,8 @@ import (
 )
 
 var (
-	ErrStreamReset = errors.New("seep: stream reset by peer")
-	ErrClosed      = errors.New("seep: closed")
+	ErrStreamReset = errors.New("soar: stream reset by peer")
+	ErrClosed      = errors.New("soar: closed")
 )
 
 // stream is one tunneled connection. All mutable state is guarded by the session mutex.
@@ -83,11 +83,11 @@ func (st *stream) send() uint64 { return st.sbase + uint64(len(st.sbuf)) }
 func (st *stream) onData(off uint64, data []byte, fin bool) error {
 	end := off + uint64(len(data))
 	if end > st.rmax {
-		return errors.New("seep: peer exceeded stream flow control")
+		return errors.New("soar: peer exceeded stream flow control")
 	}
 	if fin {
 		if st.rfin && st.rfinOff != end {
-			return errors.New("seep: inconsistent stream FIN")
+			return errors.New("soar: inconsistent stream FIN")
 		}
 		st.rfin, st.rfinOff = true, end
 	}

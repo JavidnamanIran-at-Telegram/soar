@@ -1,4 +1,4 @@
-module github.com/getlantern/seep
+module github.com/getlantern/soar
 
 go 1.25.0
 

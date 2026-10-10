@@ -1,4 +1,4 @@
-package seep
+package soar
 
 import (
 	"bytes"
@@ -182,14 +182,14 @@ func (cs *clientSession) isClosed() bool {
 func NewClient(cfg Config) (*Client, error) {
 	cfg.setDefaults()
 	if len(cfg.ServerKey) != ed25519.PublicKeySize {
-		return nil, errors.New("seep: client needs the server's Ed25519 public key")
+		return nil, errors.New("soar: client needs the server's Ed25519 public key")
 	}
 	z, err := parseZone(cfg.Zone)
 	if err != nil {
 		return nil, err
 	}
 	if len(cfg.Resolvers) == 0 && !cfg.Discovery.Enabled {
-		return nil, errors.New("seep: no resolvers and discovery is off")
+		return nil, errors.New("soar: no resolvers and discovery is off")
 	}
 	pc, err := net.ListenPacket("udp", ":0")
 	if err != nil {
@@ -204,7 +204,7 @@ func NewClient(cfg Config) (*Client, error) {
 	}
 	if len(c.paths) == 0 && !cfg.Discovery.Enabled {
 		pc.Close()
-		return nil, errors.New("seep: no usable resolvers")
+		return nil, errors.New("soar: no usable resolvers")
 	}
 	if cfg.Discovery.Enabled {
 		c.cands = cfg.Discovery.candidates()
@@ -274,7 +274,7 @@ func (c *Client) wake() { signal(c.wakeCh) }
 // DialContext opens a stream to addr (host:port) through the tunnel.
 func (c *Client) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	if len(addr) == 0 || len(addr) > 255 {
-		return nil, errors.New("seep: bad address")
+		return nil, errors.New("soar: bad address")
 	}
 	cs, err := c.session(ctx)
 	if err != nil {
@@ -295,7 +295,7 @@ func (c *Client) DialContext(ctx context.Context, network, addr string) (net.Con
 
 type tunnelAddr string
 
-func (a tunnelAddr) Network() string { return "seep" }
+func (a tunnelAddr) Network() string { return "soar" }
 func (a tunnelAddr) String() string  { return string(a) }
 
 // session returns an established session, handshaking if needed.
@@ -480,7 +480,7 @@ func (c *Client) expireLocked(now time.Time) {
 		q.expired = true
 		if q.errRcode == rcodeNXDomain && q.sess != nil && q.sess.established && !q.hello {
 			if q.sess.nx++; q.sess.nx >= nxdomainToDead {
-				q.sess.close(errors.New("seep: server lost the session"))
+				q.sess.close(errors.New("soar: server lost the session"))
 			}
 		}
 		c.failLocked(q, now, q.errRcode == rcodeRefused)

@@ -1,4 +1,4 @@
-package seep
+package soar
 
 import (
 	"context"
@@ -118,7 +118,7 @@ type heldQuery struct {
 func Serve(ctx context.Context, pc net.PacketConn, cfg ServerConfig) error {
 	cfg.setDefaults()
 	if len(cfg.PrivateKey) != ed25519.PrivateKeySize {
-		return errors.New("seep: server needs an Ed25519 private key")
+		return errors.New("soar: server needs an Ed25519 private key")
 	}
 	z, err := parseZone(cfg.Zone)
 	if err != nil {
@@ -469,7 +469,7 @@ func PublicOnly(network, address string, _ syscall.RawConn) error {
 		return err
 	}
 	if a := ap.Addr(); !isPublic(a) || isLocal(a) {
-		return fmt.Errorf("seep: destination %s is not public", a)
+		return fmt.Errorf("soar: destination %s is not public", a)
 	}
 	return nil
 }
@@ -548,7 +548,7 @@ func readAddr(r io.Reader) (string, error) {
 	}
 	n := int(b[0])
 	if n == 0 || n > 255 {
-		return "", errors.New("seep: bad destination")
+		return "", errors.New("soar: bad destination")
 	}
 	addr := make([]byte, n)
 	if _, err := io.ReadFull(r, addr); err != nil {
@@ -606,7 +606,7 @@ func (s *Server) sweep() {
 	}
 }
 
-var debugOn = os.Getenv("SEEP_DEBUG") != ""
+var debugOn = os.Getenv("SOAR_DEBUG") != ""
 
 func dbg(f string, a ...any) {
 	if debugOn {

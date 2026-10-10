@@ -1,8 +1,8 @@
-package seep
+package soar
 
 import "errors"
 
-var errShort = errors.New("seep: short buffer")
+var errShort = errors.New("soar: short buffer")
 
 // QUIC variable-length integers (RFC 9000 §16): 1, 2, 4 or 8 bytes, length in the top two bits.
 

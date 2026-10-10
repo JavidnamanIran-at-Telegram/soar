@@ -1,4 +1,4 @@
-package seep
+package soar
 
 import (
 	"errors"
@@ -128,7 +128,7 @@ func (s *session) openStream() (*stream, error) {
 		return nil, s.closeErr
 	}
 	if len(s.streams) >= s.cfg.MaxStreams {
-		return nil, errors.New("seep: too many streams")
+		return nil, errors.New("soar: too many streams")
 	}
 	st := newStream(s, s.nextStreamID)
 	s.nextStreamID++
@@ -242,7 +242,7 @@ func (s *session) receive(pn uint64, frames []byte, now time.Time) (bool, error)
 				st.smax = f.val
 			}
 		case f.typ == frClose:
-			s.closeLocked(fmt.Errorf("seep: session closed by peer (code %d)", f.val))
+			s.closeLocked(fmt.Errorf("soar: session closed by peer (code %d)", f.val))
 		case f.typ&0xF8 == frStream:
 			st := s.peerStream(f.id)
 			if st == nil {

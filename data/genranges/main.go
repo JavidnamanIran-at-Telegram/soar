@@ -1,4 +1,4 @@
-// Command genranges writes a country's IPv4 ranges for seep's optional range sampling, from a
+// Command genranges writes a country's IPv4 ranges for soar's optional range sampling, from a
 // regional internet registry's delegation statistics.
 //
 //	go run ./data/genranges -cc CN -rir apnic > data/ranges/cn.txt

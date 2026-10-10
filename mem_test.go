@@ -1,4 +1,4 @@
-package seep
+package soar
 
 import (
 	"bufio"
@@ -18,11 +18,11 @@ import (
 )
 
 // TestClientMemory reports the client's heap under load with the server in another process.
-// SEEP_SERVER_BIN=path/to/seep-server to run.
+// SOAR_SERVER_BIN=path/to/soar-server to run.
 func TestClientMemory(t *testing.T) {
-	bin := os.Getenv("SEEP_SERVER_BIN")
+	bin := os.Getenv("SOAR_SERVER_BIN")
 	if bin == "" {
-		t.Skip("set SEEP_SERVER_BIN")
+		t.Skip("set SOAR_SERVER_BIN")
 	}
 	out, err := exec.Command(bin, "keygen").Output()
 	if err != nil {
