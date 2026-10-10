@@ -100,7 +100,7 @@ func TestDNSRoundTrip(t *testing.T) {
 		n := z.maxPayload(nameLen)
 		payload := make([]byte, n)
 		rand.Read(payload)
-		msg := appendQuery(nil, 7, payload, z, 1232)
+		msg := appendQuery(nil, 7, payload, z, typeTXT, 1232)
 		end, _ := skipName(msg, hdrLen)
 		if pres := end - hdrLen - 2; pres > nameLen {
 			t.Fatalf("name %d chars > %d", pres, nameLen)
@@ -112,7 +112,7 @@ func TestDNSRoundTrip(t *testing.T) {
 		if err != nil || !bytes.Equal(q.payload, payload) || q.edns != 1232 {
 			t.Fatalf("nameLen %d: payload mismatch (%v)", nameLen, err)
 		}
-		cap := txtCapacity(q, 512)
+		cap := capacity(q, 512)
 		data := make([]byte, cap)
 		rand.Read(data)
 		ans := appendAnswer(nil, q, rcodeOK, data)
@@ -180,5 +180,41 @@ func TestPeerStreamReorderedOpens(t *testing.T) {
 	}
 	if s.peerStream(100) != nil {
 		t.Fatal("id far beyond the window accepted")
+	}
+}
+
+func TestAAAACarrier(t *testing.T) {
+	z, _ := parseZone("t.example.com")
+	msg := appendQuery(nil, 9, []byte("hello"), z, typeAAAA, 1232)
+	q, err := parseQuery(msg, z)
+	if err != nil || q.qtype != typeAAAA {
+		t.Fatal(err)
+	}
+	for _, limit := range []int{512, 1232} {
+		n := capacity(q, limit)
+		data := make([]byte, n)
+		rand.Read(data)
+		ans := appendAnswer(nil, q, rcodeOK, data)
+		if len(ans) > limit {
+			t.Fatalf("limit %d: answer %d bytes", limit, len(ans))
+		}
+		// Resolvers may reorder the RRset: reverse it.
+		a0, _ := parseAnswer(ans)
+		_ = a0
+		start := hdrLen + len(q.question)
+		rrs := ans[start : start+(len(ans)-start-11)]
+		var recs [][]byte
+		for i := 0; i+aaaaRRLen <= len(rrs); i += aaaaRRLen {
+			recs = append(recs, rrs[i:i+aaaaRRLen])
+		}
+		shuffled := append([]byte(nil), ans[:start]...)
+		for i := len(recs) - 1; i >= 0; i-- {
+			shuffled = append(shuffled, recs[i]...)
+		}
+		shuffled = append(shuffled, ans[start+len(rrs):]...)
+		a, err := parseAnswer(shuffled)
+		if err != nil || !bytes.Equal(a.txt, data) {
+			t.Fatalf("limit %d: %v, got %d bytes want %d", limit, err, len(a.txt), len(data))
+		}
 	}
 }

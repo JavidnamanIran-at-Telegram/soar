@@ -158,7 +158,7 @@ func (s *Server) handle(msg []byte, addr net.Addr) {
 	if err != nil {
 		return
 	}
-	if q.payload == nil || q.qtype != typeTXT {
+	if q.payload == nil || (q.qtype != typeTXT && q.qtype != typeAAAA) {
 		s.reply(q, addr, rcodeRefused, nil)
 		return
 	}
@@ -348,7 +348,7 @@ func (ss *srvSession) answerPktLocked(hq *heldQuery, now time.Time) (sendItem, *
 		}
 	}
 	// Plaintext: hold applied (10ms units), backlog (packets queued), frames.
-	budget := txtCapacity(hq.q, hq.limit) - 2 - tagLen
+	budget := capacity(hq.q, hq.limit) - 2 - tagLen
 	held := min(now.Sub(hq.at)/(10*time.Millisecond), 255)
 	plain := []byte{byte(held), 0}
 	pn, plain, _, pkt := ss.build(plain, budget-2, now, hq.upPN)

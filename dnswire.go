@@ -9,10 +9,16 @@ import (
 
 const (
 	typeTXT  = 16
-	typeOPT  = 41
-	classIN  = 1
-	hdrLen   = 12
-	maxLabel = 63
+	typeAAAA = 28
+	// An AAAA record carries an index byte and 15 payload bytes: resolvers may shuffle an RRset
+	// and drop duplicate records, so each is numbered (and so unique).
+	aaaaChunk   = 15
+	aaaaRRLen   = 2 + 10 + 16
+	aaaaMaxRecs = 255
+	typeOPT     = 41
+	classIN     = 1
+	hdrLen      = 12
+	maxLabel    = 63
 	// maxName is the longest presentation-format name (RFC 1035: 255 wire bytes).
 	maxName = 253
 
@@ -111,8 +117,8 @@ func (z zone) maxPayload(nameLen int) int {
 	return c * 5 / 8
 }
 
-// appendQuery appends a TXT query for payload under z.
-func appendQuery(b []byte, txn uint16, payload []byte, z zone, ednsSize uint16) []byte {
+// appendQuery appends a qtype (TXT or AAAA) query for payload under z.
+func appendQuery(b []byte, txn uint16, payload []byte, z zone, qtype uint16, ednsSize uint16) []byte {
 	b = binary.BigEndian.AppendUint16(b, txn)
 	b = append(b, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 1) // RD; QD=1, AR=1
 	var enc [maxName]byte
@@ -125,7 +131,7 @@ func appendQuery(b []byte, txn uint16, payload []byte, z zone, ednsSize uint16) 
 	}
 	b = append(b, z.wire...)
 	b = append(b, 0)
-	b = binary.BigEndian.AppendUint16(b, typeTXT)
+	b = binary.BigEndian.AppendUint16(b, qtype)
 	b = binary.BigEndian.AppendUint16(b, classIN)
 	return appendOPT(b, ednsSize)
 }
@@ -218,8 +224,12 @@ func answerOverhead(q *query) int {
 	return n
 }
 
-// txtCapacity is how many payload bytes fit in an answer of at most limit bytes to q.
-func txtCapacity(q *query, limit int) int {
+// capacity is how many payload bytes fit in an answer of at most limit bytes to q.
+func capacity(q *query, limit int) int {
+	if q.qtype == typeAAAA {
+		recs := min((limit-answerOverhead(q)+12)/aaaaRRLen, aaaaMaxRecs)
+		return max(recs*aaaaChunk-2, 0)
+	}
 	room := limit - answerOverhead(q)
 	if room <= 1 {
 		return 0
@@ -228,8 +238,12 @@ func txtCapacity(q *query, limit int) int {
 	return room - (room+255)/256
 }
 
-// appendAnswer appends a response to q carrying payload as TXT, or no records if payload is nil.
+// appendAnswer appends a response to q carrying payload in records of the query's type, or no
+// records if payload is nil.
 func appendAnswer(b []byte, q *query, rcode byte, payload []byte) []byte {
+	if q.qtype == typeAAAA && payload != nil {
+		return appendAAAAAnswer(b, q, rcode, payload)
+	}
 	b = binary.BigEndian.AppendUint16(b, q.txn)
 	flags := byte(0x84) // QR, AA
 	if q.rd {
@@ -271,14 +285,53 @@ func appendAnswer(b []byte, q *query, rcode byte, payload []byte) []byte {
 	return b
 }
 
+func appendAnswerHeader(b []byte, q *query, rcode byte, an int) []byte {
+	b = binary.BigEndian.AppendUint16(b, q.txn)
+	flags := byte(0x84) // QR, AA
+	if q.rd {
+		flags |= 0x01
+	}
+	ar := 0
+	if q.hasOPT {
+		ar = 1
+	}
+	b = append(b, flags, rcode, 0, 1)
+	b = binary.BigEndian.AppendUint16(b, uint16(an))
+	b = append(b, 0, 0, 0, byte(ar))
+	return append(b, q.question...)
+}
+
+// appendAAAAAnswer carries [u16 length][payload] in numbered 15-byte chunks.
+func appendAAAAAnswer(b []byte, q *query, rcode byte, payload []byte) []byte {
+	data := binary.BigEndian.AppendUint16(make([]byte, 0, 2+len(payload)), uint16(len(payload)))
+	data = append(data, payload...)
+	recs := (len(data) + aaaaChunk - 1) / aaaaChunk
+	b = appendAnswerHeader(b, q, rcode, recs)
+	for i := range recs {
+		b = append(b, 0xC0, hdrLen)
+		b = binary.BigEndian.AppendUint16(b, typeAAAA)
+		b = binary.BigEndian.AppendUint16(b, classIN)
+		b = append(b, 0, 0, 0, 0, 0, 16, byte(i))
+		chunk := data[i*aaaaChunk : min((i+1)*aaaaChunk, len(data))]
+		b = append(b, chunk...)
+		for range aaaaChunk - len(chunk) {
+			b = append(b, 0)
+		}
+	}
+	if q.hasOPT {
+		b = appendOPT(b, 1232)
+	}
+	return b
+}
+
 // answer is a parsed response.
 type answer struct {
 	txn      uint16
 	tc       bool
 	rcode    int
 	question []byte
-	txt      []byte // concatenated character-strings of TXT answers
-	hasTXT   bool
+	txt      []byte // the carried payload (TXT strings, or reassembled AAAA chunks)
+	hasTXT   bool   // a carrier record was present
 }
 
 func parseAnswer(msg []byte) (*answer, error) {
@@ -298,6 +351,7 @@ func parseAnswer(msg []byte) (*answer, error) {
 	}
 	a.question = msg[hdrLen : i+4]
 	i += 4
+	var aaaa [][]byte
 	for range an {
 		if i, err = skipName(msg, i); err != nil || i+10 > len(msg) {
 			return nil, errDNS
@@ -307,6 +361,9 @@ func parseAnswer(msg []byte) (*answer, error) {
 		i += 10
 		if i+rdlen > len(msg) {
 			return nil, errDNS
+		}
+		if typ == typeAAAA && rdlen == 16 {
+			aaaa = append(aaaa, msg[i:i+16])
 		}
 		if typ == typeTXT {
 			a.hasTXT = true
@@ -321,6 +378,23 @@ func parseAnswer(msg []byte) (*answer, error) {
 			}
 		}
 		i += rdlen
+	}
+	if len(aaaa) > 0 && !a.hasTXT {
+		data := make([]byte, len(aaaa)*aaaaChunk)
+		seen := make([]bool, len(aaaa))
+		for _, rr := range aaaa {
+			k := int(rr[0])
+			if k >= len(aaaa) || seen[k] {
+				return nil, errDNS
+			}
+			seen[k] = true
+			copy(data[k*aaaaChunk:], rr[1:])
+		}
+		n := int(binary.BigEndian.Uint16(data))
+		if 2+n > len(data) {
+			return nil, errDNS
+		}
+		a.txt, a.hasTXT = data[2:2+n], true
 	}
 	return a, nil
 }

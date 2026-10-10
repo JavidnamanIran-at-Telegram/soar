@@ -114,6 +114,7 @@ type path struct {
 	tcp       *tcpLink // nil for UDP
 	sibling   bool     // a TCP path was added for this UDP path
 	candidate bool     // added by discovery; pruned if it never answers
+	qtype     uint16   // record type carrying answers: TXT, or AAAA where TXT is refused
 	srtt      time.Duration
 	rttvar    time.Duration
 	hasRTT    bool
@@ -233,7 +234,7 @@ func (c *Client) addPathLocked(r string) error {
 
 func (c *Client) newPath(ua *net.UDPAddr, tcp bool) *path {
 	p := &path{addr: ua, cwnd: 4, ssthresh: float64(c.cfg.MaxPathWindow),
-		nameLen: c.cfg.SafeQName, limitClass: limitClasses - 1}
+		nameLen: c.cfg.SafeQName, limitClass: limitClasses - 1, qtype: typeTXT}
 	if tcp {
 		p.tcp = c.startTCP(ua.String())
 	}
@@ -501,10 +502,16 @@ func (c *Client) failLocked(q *pendingQuery, now time.Time, refused bool) {
 		p.probing = false
 		p.probeFails++
 	}
-	if refused {
-		p.consec += 2
+	if refused && p.qtype == typeTXT {
+		// Some resolvers refuse TXT (seen in Iran): carry answers in AAAA records instead.
+		p.qtype = typeAAAA
+		p.outN, p.consec, p.suspended = 0, 0, time.Time{}
+	} else {
+		if refused {
+			p.consec += 2
+		}
+		p.onLoss(now)
 	}
-	p.onLoss(now)
 	if q.hello || q.sess == nil || q.sess.session == nil {
 		return
 	}
@@ -667,7 +674,7 @@ func (c *Client) sendDataLocked(cs *clientSession, p *path, now time.Time, allow
 func (c *Client) sendLocked(p *path, q *pendingQuery, payload []byte, now time.Time, timeout time.Duration) {
 	q.txn = c.newTxnLocked()
 	q.errRcode = -1
-	msg := appendQuery(make([]byte, 0, 300), q.txn, payload, c.z, 1232)
+	msg := appendQuery(make([]byte, 0, 300), q.txn, payload, c.z, p.qtype, 1232)
 	end, err := skipName(msg, hdrLen)
 	if err != nil {
 		return
