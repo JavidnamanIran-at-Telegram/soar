@@ -110,8 +110,9 @@ type Server struct {
 	signTokens tokenBucket
 	helloQ     chan helloJob
 
-	rrlMu sync.Mutex
-	rrl   map[netip.Prefix]*byteBucket
+	rrlMu       sync.Mutex
+	rrl         map[netip.Prefix]*byteBucket
+	rrlOverflow *byteBucket
 }
 
 type helloEntry struct {
@@ -183,7 +184,7 @@ func Serve(ctx context.Context, pc net.PacketConn, cfg ServerConfig) error {
 }
 
 func (s *Server) reply(q *query, addr net.Addr, rcode byte, payload []byte) {
-	s.write(appendAnswer(make([]byte, 0, 512), q, rcode, payload), addr)
+	s.write(appendAnswer(make([]byte, 0, 512), q, rcode, payload), addr, q.size)
 }
 
 func (s *Server) handle(msg []byte, addr net.Addr) {
@@ -457,42 +458,58 @@ func (ss *srvSession) onQuery(q *query, addr net.Addr, p []byte) {
 }
 
 type sendItem struct {
-	msg  []byte
-	addr net.Addr
+	msg   []byte
+	addr  net.Addr
+	qsize int // size of the query being answered
 }
 
 func (s *Server) send(items []sendItem) {
 	for _, it := range items {
-		s.write(it.msg, it.addr)
+		s.write(it.msg, it.addr, it.qsize)
 	}
 }
 
-// write sends one answer if its destination prefix is within its byte budget. A session's
-// queries can carry a spoofed source, and answers outweigh queries, so this bounds what the
-// server reflects at any one network; a real resolver stays far below it.
-func (s *Server) write(msg []byte, addr net.Addr) {
-	if ua, ok := addr.(*net.UDPAddr); ok {
-		ip := ua.AddrPort().Addr().Unmap()
-		bits := 24
-		if ip.Is6() {
-			bits = 48
-		}
-		key, _ := ip.Prefix(bits)
-		now := time.Now()
-		s.rrlMu.Lock()
-		b := s.rrl[key]
-		if b == nil {
-			rate := float64(s.cfg.MaxBytesPerPrefix)
-			b = &byteBucket{rate: rate, burst: rate / 4, tokens: rate / 4, last: now}
-			s.rrl[key] = b
-		}
-		ok := b.take(now, len(msg))
-		s.rrlMu.Unlock()
-		if !ok {
+// write sends one answer if its destination prefix is within its amplification budget. A
+// session's queries can carry a spoofed source and answers outweigh queries, so this bounds what
+// the server reflects at any one network. Only the amplified bytes (answer minus query) count:
+// error replies and small answers cost nothing, so spoofing a busy resolver's prefix with cheap
+// queries can't drain the budget its real users depend on.
+func (s *Server) write(msg []byte, addr net.Addr, qsize int) {
+	if amp := len(msg) - qsize; amp > 0 {
+		if ua, ok := addr.(*net.UDPAddr); ok && !s.allowAmplification(ua, amp) {
 			return
 		}
 	}
 	s.pc.WriteTo(msg, addr)
+}
+
+// maxRRLPrefixes bounds the per-prefix table; prefixes beyond it share one overflow budget, so a
+// flood of spoofed sources can neither grow memory nor escape the limit.
+const maxRRLPrefixes = 1 << 16
+
+func (s *Server) allowAmplification(ua *net.UDPAddr, n int) bool {
+	ip := ua.AddrPort().Addr().Unmap()
+	bits := 24
+	if ip.Is6() {
+		bits = 48
+	}
+	key, _ := ip.Prefix(bits)
+	now := time.Now()
+	rate := float64(s.cfg.MaxBytesPerPrefix)
+	s.rrlMu.Lock()
+	defer s.rrlMu.Unlock()
+	b := s.rrl[key]
+	if b == nil {
+		if len(s.rrl) >= maxRRLPrefixes {
+			if s.rrlOverflow == nil {
+				s.rrlOverflow = &byteBucket{rate: rate, burst: rate / 4, tokens: rate / 4, last: now}
+			}
+			return s.rrlOverflow.take(now, n)
+		}
+		b = &byteBucket{rate: rate, burst: rate / 4, tokens: rate / 4, last: now}
+		s.rrl[key] = b
+	}
+	return b.take(now, n)
 }
 
 // byteBucket is a byte-rate limiter. Caller serializes access.
@@ -541,7 +558,7 @@ func (ss *srvSession) answerPktLocked(hq *heldQuery, now time.Time) (sendItem, *
 	payload := make([]byte, 0, 2+len(sealed))
 	payload = append(payload, hdr[0]^m[0], hdr[1]^m[1])
 	payload = append(payload, sealed...)
-	return sendItem{msg: appendAnswer(make([]byte, 0, hq.limit), hq.q, rcodeOK, payload), addr: hq.addr}, pkt
+	return sendItem{msg: appendAnswer(make([]byte, 0, hq.limit), hq.q, rcodeOK, payload), addr: hq.addr, qsize: hq.q.size}, pkt
 }
 
 // emptyAnswerLocked answers hq with a packet carrying no frames.
@@ -555,7 +572,7 @@ func (ss *srvSession) emptyAnswerLocked(hq *heldQuery, now time.Time) sendItem {
 	sealed := ss.seal.seal(nil, downAD(hdr, hq.upPN), plain, pn)
 	m := ss.seal.mask(sealed)
 	payload := append([]byte{hdr[0] ^ m[0], hdr[1] ^ m[1]}, sealed...)
-	return sendItem{msg: appendAnswer(make([]byte, 0, 128), hq.q, rcodeOK, payload), addr: hq.addr}
+	return sendItem{msg: appendAnswer(make([]byte, 0, 128), hq.q, rcodeOK, payload), addr: hq.addr, qsize: hq.q.size}
 }
 
 // drainLocked answers held queries, oldest first, while there's data. Caller holds ss.mu.

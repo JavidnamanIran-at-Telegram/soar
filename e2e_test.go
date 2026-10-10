@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"slices"
 	"strings"
 	"sync"
@@ -854,4 +855,38 @@ func tcpOnlyResolver(t *testing.T, server string) string {
 		}
 	}()
 	return ln.Addr().String()
+}
+
+func TestAmplificationBudget(t *testing.T) {
+	s := &Server{cfg: ServerConfig{MaxBytesPerPrefix: 4000}, rrl: make(map[netip.Prefix]*byteBucket)}
+	victim := &net.UDPAddr{IP: net.ParseIP("192.0.2.7"), Port: 53}
+	// Unamplified replies never draw on the budget, so spoofed junk can't drain it.
+	for range 1000 {
+		if !s.allowAmplification(victim, 0) {
+			t.Fatal("zero-amplification reply refused")
+		}
+	}
+	allowed := 0
+	for range 100 {
+		if s.allowAmplification(victim, 500) {
+			allowed++
+		}
+	}
+	if allowed > 2 {
+		t.Fatalf("%d amplified answers allowed against a 1000-byte burst", allowed)
+	}
+	// A full table sends new prefixes to the shared overflow budget, not unlimited.
+	for i := range maxRRLPrefixes - len(s.rrl) {
+		s.rrl[netip.PrefixFrom(netip.AddrFrom4([4]byte{10, byte(i >> 8), byte(i), 0}), 24)] = &byteBucket{}
+	}
+	other := &net.UDPAddr{IP: net.ParseIP("198.51.100.1"), Port: 53}
+	n := 0
+	for range 100 {
+		if s.allowAmplification(other, 500) {
+			n++
+		}
+	}
+	if n > 2 || len(s.rrl) > maxRRLPrefixes {
+		t.Fatalf("overflow: %d allowed, table %d", n, len(s.rrl))
+	}
 }

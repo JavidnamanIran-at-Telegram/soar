@@ -156,6 +156,7 @@ type query struct {
 	payload  []byte // decoded tunnel payload, or nil if the name isn't under the zone
 	edns     int    // the sender's UDP payload size; 512 without OPT
 	hasOPT   bool
+	size     int // bytes in the query message, for amplification accounting
 }
 
 // parseQuery parses a query and decodes the tunnel payload under z.
@@ -163,7 +164,7 @@ func parseQuery(msg []byte, z zone) (*query, error) {
 	if len(msg) < hdrLen || msg[2]&0x80 != 0 || binary.BigEndian.Uint16(msg[4:]) != 1 {
 		return nil, errDNS
 	}
-	q := &query{txn: binary.BigEndian.Uint16(msg), rd: msg[2]&0x01 != 0, edns: 512}
+	q := &query{txn: binary.BigEndian.Uint16(msg), rd: msg[2]&0x01 != 0, edns: 512, size: len(msg)}
 	var labels [][]byte
 	i := hdrLen
 	for {
