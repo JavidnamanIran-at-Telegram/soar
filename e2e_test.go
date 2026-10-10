@@ -5,13 +5,16 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	mrand "math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -440,5 +443,43 @@ func TestIdleSessionSurvivesResume(t *testing.T) {
 	c.mu.Unlock()
 	if !same {
 		t.Fatal("resuming after idle reset a healthy session")
+	}
+}
+
+func TestPublicOnlyRefusesOwnAddressesViaNAT64(t *testing.T) {
+	addrs, _ := net.InterfaceAddrs()
+	for _, ia := range addrs {
+		ipn, ok := ia.(*net.IPNet)
+		if !ok || ipn.IP.To4() == nil {
+			continue
+		}
+		v4 := ipn.IP.To4()
+		for _, wrapped := range []string{
+			fmt.Sprintf("[64:ff9b::%x%02x:%x%02x]:443", v4[0], v4[1], v4[2], v4[3]),
+			fmt.Sprintf("[2002:%x%02x:%x%02x::1]:443", v4[0], v4[1], v4[2], v4[3]),
+		} {
+			if err := PublicOnly("tcp", wrapped, nil); err == nil {
+				t.Errorf("own address %s allowed as %s", v4, wrapped)
+			}
+		}
+	}
+}
+
+func TestResetStreamIsNeverDialed(t *testing.T) {
+	var dials atomic.Int32
+	srv := &Server{ctx: context.Background(), cfg: ServerConfig{Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dials.Add(1)
+		return nil, errors.New("unreachable")
+	}, Logger: slog.New(slog.DiscardHandler)}}
+	ss := &srvSession{session: newSession(false, streamConfig{StreamWindow: 1 << 16, SendBuffer: 1 << 16, MaxStreams: 4}, nil, nil), srv: srv}
+	ss.mu.Lock()
+	st := ss.peerStream(0)
+	dest := "example.com:443"
+	st.onData(0, append([]byte{byte(len(dest))}, dest...), false)
+	st.abort(ErrStreamReset) // a RESET in the same packet as the destination
+	ss.mu.Unlock()
+	ss.serveStream(st)
+	if n := dials.Load(); n != 0 {
+		t.Fatalf("dialed a reset stream %d times", n)
 	}
 }

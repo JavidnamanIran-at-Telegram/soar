@@ -461,7 +461,23 @@ func (ss *srvSession) serveStream(st *stream) {
 		c.Close()
 		return
 	}
+	// The dial dies with the stream: a reset (even one in the same packet as the destination)
+	// releases the stream's quota, so its dial must not outlive it.
+	ss.mu.Lock()
+	gone := st.reset || st.rclosed
+	ss.mu.Unlock()
+	if gone {
+		c.Close()
+		return
+	}
 	ctx, cancel := context.WithTimeout(ss.srv.ctx, 30*time.Second)
+	go func() {
+		select {
+		case <-st.dead:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 	up, err := ss.srv.cfg.Dial(ctx, "tcp", addr)
 	cancel()
 	if err != nil {
@@ -513,11 +529,36 @@ func PublicOnly(network, address string, _ syscall.RawConn) error {
 	if err != nil {
 		return err
 	}
-	if a := ap.Addr(); !isPublic(a) || isLocal(a) {
+	a := ap.Addr()
+	if v4, ok := embeddedV4(a); ok && isLocal(v4) {
+		return fmt.Errorf("soar: destination %s is not public", a)
+	}
+	if !isPublic(a) || isLocal(a) {
 		return fmt.Errorf("soar: destination %s is not public", a)
 	}
 	return nil
 }
+
+// embeddedV4 returns the IPv4 destination a NAT64 or 6to4 address translates to.
+func embeddedV4(a netip.Addr) (netip.Addr, bool) {
+	a = a.Unmap()
+	if !a.Is6() {
+		return netip.Addr{}, false
+	}
+	b := a.As16()
+	switch {
+	case nat64.Contains(a):
+		return netip.AddrFrom4([4]byte(b[12:16])), true
+	case sixToFour.Contains(a):
+		return netip.AddrFrom4([4]byte(b[2:6])), true
+	}
+	return netip.Addr{}, false
+}
+
+var (
+	nat64     = netip.MustParsePrefix("64:ff9b::/96")
+	sixToFour = netip.MustParsePrefix("2002::/16")
+)
 
 // localAddrs caches this host's interface addresses: dialing our own public IP would reach
 // services bound to all interfaces from inside, past firewalls that only filter outside traffic.
@@ -573,14 +614,8 @@ func isPublic(a netip.Addr) bool {
 		}
 	}
 	// NAT64 and 6to4 embed an IPv4 destination: judge that.
-	if a.Is6() {
-		b := a.As16()
-		if netip.MustParsePrefix("64:ff9b::/96").Contains(a) {
-			return isPublic(netip.AddrFrom4([4]byte(b[12:16])))
-		}
-		if netip.MustParsePrefix("2002::/16").Contains(a) {
-			return isPublic(netip.AddrFrom4([4]byte(b[2:6])))
-		}
+	if v4, ok := embeddedV4(a); ok {
+		return isPublic(v4)
 	}
 	return true
 }
