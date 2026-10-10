@@ -996,3 +996,99 @@ func TestForgedErrorsDoNotCutQueriesShort(t *testing.T) {
 		})
 	}
 }
+
+// qminResolver mimics a resolver doing QNAME minimisation (RFC 9156): before each query it asks
+// for every ancestor under the zone with type A, one label at a time, and gives up with that
+// answer's rcode unless it's NOERROR.
+func qminResolver(t *testing.T, server string) string {
+	front, _ := net.ListenPacket("udp", "127.0.0.1:0")
+	t.Cleanup(func() { front.Close() })
+	saddr, _ := net.ResolveUDPAddr("udp", server)
+	z, _ := parseZone(testZone)
+	ask := func(msg []byte) ([]byte, error) {
+		back, _ := net.ListenPacket("udp", "127.0.0.1:0")
+		defer back.Close()
+		back.WriteTo(msg, saddr)
+		back.SetReadDeadline(time.Now().Add(3 * time.Second))
+		rb := make([]byte, 4096)
+		n, _, err := back.ReadFrom(rb)
+		return rb[:n], err
+	}
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, from, err := front.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			msg := append([]byte(nil), buf[:n]...)
+			go func() {
+				q, err := parseQuery(msg, z)
+				if err != nil {
+					return
+				}
+				// Labels left of the zone, rightmost first.
+				var labels [][]byte
+				for i := hdrLen; msg[i] != 0; i += 1 + int(msg[i]) {
+					labels = append(labels, msg[i+1:i+1+int(msg[i])])
+				}
+				zl := strings.Count(testZone, ".") + 1
+				for k := 1; k < len(labels)-zl+1; k++ {
+					var name []byte
+					for _, l := range labels[len(labels)-zl-k:] {
+						name = append(name, byte(len(l)))
+						name = append(name, l...)
+					}
+					m := []byte{0, 7, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0}
+					m = append(append(m, name...), 0, 0, 1, 0, 1) // type A
+					a, err := ask(m)
+					if err != nil || a[3]&0x0F != rcodeOK {
+						code := byte(rcodeServFail)
+						if err == nil {
+							code = a[3] & 0x0F
+						}
+						front.WriteTo(appendAnswer(nil, q, code, nil), from)
+						return
+					}
+				}
+				if a, err := ask(msg); err == nil {
+					front.WriteTo(a, from)
+				}
+			}()
+		}
+	}()
+	return front.LocalAddr().String()
+}
+
+func TestTunnelThroughQNAMEMinimisingResolver(t *testing.T) {
+	srv, pub := startServer(t)
+	origin := startOrigin(t)
+	c, _ := NewClient(Config{Zone: testZone, ServerKey: pub, Resolvers: []string{qminResolver(t, srv)}})
+	defer c.Close()
+	fetch(t, c, origin, 20<<10)
+}
+
+func TestApexSOAAndNoData(t *testing.T) {
+	z, _ := parseZone(testZone)
+	for _, tc := range []struct {
+		name  string
+		qtype uint16
+		an    int
+	}{{testZone, typeSOA, 1}, {testZone, 2 /* NS */, 0}, {"abc." + testZone, 1 /* A */, 0}} {
+		var name []byte
+		for _, l := range strings.Split(tc.name, ".") {
+			name = append(append(name, byte(len(l))), l...)
+		}
+		m := append([]byte{0, 9, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0}, name...)
+		m = append(m, 0, byte(tc.qtype>>8), byte(tc.qtype), 0, 1)
+		q, err := parseQuery(m, z)
+		if err != nil || !q.inZone {
+			t.Fatalf("%s: inZone=%v err=%v", tc.name, q != nil && q.inZone, err)
+		}
+		ans := appendNoData(nil, q, z)
+		a, err := parseAnswer(ans)
+		if err != nil || a.rcode != rcodeOK || ans[2]&0x04 == 0 || int(ans[7]) != tc.an {
+			t.Fatalf("%s type %d: rcode=%d aa=%v an=%d err=%v", tc.name, tc.qtype, a.rcode, ans[2]&0x04 != 0, ans[7], err)
+		}
+	}
+}

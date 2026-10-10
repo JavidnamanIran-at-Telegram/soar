@@ -192,15 +192,15 @@ func (s *Server) handle(msg []byte, addr net.Addr) {
 	if err != nil {
 		return
 	}
-	if q.payload == nil || (q.qtype != typeTXT && q.qtype != typeAAAA) {
+	if !q.inZone {
 		s.reply(q, addr, rcodeRefused, nil)
 		return
 	}
-	p := q.payload
-	if len(p) < 2 {
-		s.reply(q, addr, rcodeNXDomain, nil)
+	if q.payload == nil || (q.qtype != typeTXT && q.qtype != typeAAAA) || len(q.payload) < 2 {
+		s.noData(q, addr)
 		return
 	}
+	p := q.payload
 	sid := binary.BigEndian.Uint16(p)
 	if sid == 0 {
 		s.hello(q, addr, p[2:])
@@ -214,10 +214,15 @@ func (s *Server) handle(msg []byte, addr net.Addr) {
 		return
 	}
 	if len(p) < 4+minPlain+tagLen {
-		s.reply(q, addr, rcodeNXDomain, nil)
+		s.noData(q, addr)
 		return
 	}
 	ss.onQuery(q, addr, p)
+}
+
+// noData answers an in-zone query that carries no usable tunnel packet (see appendNoData).
+func (s *Server) noData(q *query, addr net.Addr) {
+	s.write(appendNoData(make([]byte, 0, 256), q, s.z), addr, q.size)
 }
 
 // replyUnknown tells the client its session is gone, signed over the question so an injector
@@ -225,7 +230,7 @@ func (s *Server) handle(msg []byte, addr net.Addr) {
 // limit the reply goes unsigned and the client ignores it.
 func (s *Server) replyUnknown(q *query, addr net.Addr) {
 	if !s.signTokens.take(time.Now()) {
-		s.reply(q, addr, rcodeNXDomain, nil)
+		s.noData(q, addr) // an unsigned "unknown session" would be ignored anyway
 		return
 	}
 	s.reply(q, addr, rcodeNXDomain, ed25519.Sign(s.cfg.PrivateKey, unknownSessionMsg(q.question)))
@@ -263,7 +268,7 @@ type helloJob struct {
 // the workers fall behind, the queue drops new hellos (clients retry) instead of growing.
 func (s *Server) hello(q *query, addr net.Addr, eph []byte) {
 	if len(eph) < pubLen {
-		s.reply(q, addr, rcodeNXDomain, nil)
+		s.noData(q, addr)
 		return
 	}
 	j := helloJob{q: q, addr: addr}
@@ -307,7 +312,7 @@ func (s *Server) handshake(j helloJob) {
 		}
 		var err error
 		if reply, up, down, err = serverHello(s.cfg.PrivateKey, j.key[:], sid); err != nil {
-			s.reply(q, addr, rcodeNXDomain, nil)
+			s.noData(q, addr)
 			return
 		}
 		s.mu.Lock()
@@ -426,7 +431,7 @@ func (ss *srvSession) onQuery(q *query, addr net.Addr, p []byte) {
 	plain, err := ss.open.open(hdr[:], sealed, pn)
 	if err != nil || len(plain) < 1 {
 		ss.mu.Unlock()
-		ss.srv.reply(q, addr, rcodeNXDomain, nil)
+		ss.srv.noData(q, addr)
 		return
 	}
 	dbg("srv q pn=%d plain=%x", pn, plain)

@@ -156,7 +156,9 @@ type query struct {
 	payload  []byte // decoded tunnel payload, or nil if the name isn't under the zone
 	edns     int    // the sender's UDP payload size; 512 without OPT
 	hasOPT   bool
-	size     int // bytes in the query message, for amplification accounting
+	size     int  // bytes in the query message, for amplification accounting
+	inZone   bool // the name is the zone or under it
+	apex     bool // the name is the zone itself
 }
 
 // parseQuery parses a query and decodes the tunnel payload under z.
@@ -198,7 +200,7 @@ func parseQuery(msg []byte, z zone) (*query, error) {
 	for w := z.wire; len(w) > 0; w = w[1+int(w[0]):] {
 		zl++
 	}
-	if len(labels) <= zl {
+	if len(labels) < zl {
 		return q, nil
 	}
 	w := z.wire
@@ -207,6 +209,10 @@ func parseQuery(msg []byte, z zone) (*query, error) {
 			return q, nil
 		}
 		w = w[1+len(l):]
+	}
+	q.inZone, q.apex = true, len(labels) == zl
+	if q.apex {
+		return q, nil
 	}
 	var enc []byte
 	for _, l := range labels[:len(labels)-zl] {
@@ -323,6 +329,45 @@ func appendAAAAAnswer(b []byte, q *query, rcode byte, payload []byte) []byte {
 			b = append(b, 0)
 		}
 	}
+	if q.hasOPT {
+		b = appendOPT(b, 1232)
+	}
+	return b
+}
+
+const typeSOA = 6
+
+// appendNoData answers an in-zone query that isn't tunnel traffic: NOERROR with no records and
+// the zone's SOA in the authority section (or the SOA itself, for an SOA query at the apex).
+// Resolvers doing QNAME minimisation (RFC 9156) walk down one label at a time; NXDOMAIN or
+// REFUSED for those partial names would make them abandon the real query.
+func appendNoData(b []byte, q *query, z zone) []byte {
+	soa := q.apex && q.qtype == typeSOA
+	b = binary.BigEndian.AppendUint16(b, q.txn)
+	flags := byte(0x84) // QR, AA
+	if q.rd {
+		flags |= 0x01
+	}
+	an, ns, ar := 0, 1, 0
+	if soa {
+		an, ns = 1, 0
+	}
+	if q.hasOPT {
+		ar = 1
+	}
+	b = append(b, flags, rcodeOK, 0, 1, 0, byte(an), 0, byte(ns), 0, byte(ar))
+	b = append(b, q.question...)
+	b = append(b, z.wire...)
+	b = append(b, 0)
+	b = binary.BigEndian.AppendUint16(b, typeSOA)
+	b = binary.BigEndian.AppendUint16(b, classIN)
+	b = append(b, 0, 0, 0, 60) // TTL
+	rd := append(append(append([]byte(nil), z.wire...), 0), append(append([]byte(nil), z.wire...), 0)...)
+	for _, v := range []uint32{1, 3600, 600, 86400, 60} { // serial, refresh, retry, expire, negative TTL
+		rd = binary.BigEndian.AppendUint32(rd, v)
+	}
+	b = binary.BigEndian.AppendUint16(b, uint16(len(rd)))
+	b = append(b, rd...)
 	if q.hasOPT {
 		b = appendOPT(b, 1232)
 	}

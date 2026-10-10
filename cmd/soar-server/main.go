@@ -1,6 +1,7 @@
 // Command soar-server is the authoritative name server for a soar tunnel zone.
 //
 //	soar-server keygen                      # prints a private and public key
+//	soar-server pubkey key                  # prints the public key for a private key file
 //	soar-server -zone t.example.com -key-file key -listen :53
 package main
 
@@ -23,6 +24,18 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 2 && os.Args[1] == "pubkey" {
+		raw, err := os.ReadFile(os.Args[2])
+		if err != nil {
+			fatal(err)
+		}
+		seed, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(raw)))
+		if err != nil || len(seed) != ed25519.SeedSize {
+			fatal(fmt.Errorf("key file must hold a base64 %d-byte seed", ed25519.SeedSize))
+		}
+		fmt.Println(base64.StdEncoding.EncodeToString(ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)))
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "keygen" {
 		pub, priv, err := ed25519.GenerateKey(rand.Reader)
 		if err != nil {
@@ -80,8 +93,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	priv := ed25519.NewKeyFromSeed(seed)
-	log.Info("serving", "zone", *zone, "listen", pc.LocalAddr(),
-		"public_key", base64.StdEncoding.EncodeToString(priv.Public().(ed25519.PublicKey)))
+	// Log hygiene: never the zone or the key. Either one in a leaked log hands a censor the
+	// string it needs to block this server; `soar-server pubkey` prints the key on demand.
+	log.Info("serving", "listen", pc.LocalAddr())
 	if err := soar.Serve(ctx, pc, soar.ServerConfig{Zone: *zone, PrivateKey: priv, Dial: dial, Logger: log}); err != nil {
 		fatal(err)
 	}
