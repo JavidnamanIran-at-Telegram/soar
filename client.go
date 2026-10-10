@@ -529,6 +529,19 @@ func (p *path) onLoss(now time.Time) {
 	}
 }
 
+// linkDown fails the queries in flight on a TCP link whose connection just closed.
+func (c *Client) linkDown(l *tcpLink) {
+	c.mu.Lock()
+	now := time.Now()
+	for _, q := range c.pending {
+		if q.p.tcp == l && !q.expired && q.deadline.After(now) {
+			q.deadline = now
+		}
+	}
+	c.mu.Unlock()
+	c.wake()
+}
+
 func (c *Client) anyUsableLocked(now time.Time) bool {
 	for _, o := range c.paths {
 		if o.verified && o.usable(now) {
@@ -1032,6 +1045,7 @@ func (c *Client) onAnswer(msg []byte) {
 		// An unauthenticated answer may be injected (China's GFW forges them on UDP/53), so it
 		// never cuts the wait for the real one short or changes the path. It's only recorded:
 		// if no authenticated answer comes by the deadline, it says why the query failed.
+		dbg("cli err answer rcode=%d tc=%v txt=%v path=%s", a.rcode, a.tc, a.hasTXT, p.addr)
 		q.errRcode, q.errTC = a.rcode, a.tc
 		if a.tc {
 			q.errRcode = rcodeServFail

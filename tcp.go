@@ -51,6 +51,7 @@ func (l *tcpLink) run(c *Client) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		conn, err := c.cfg.DialTCP(ctx, "tcp", l.addr)
 		cancel()
+		dbg("tcp link %s dial err=%v", l.addr, err)
 		if err != nil {
 			select {
 			case <-c.done:
@@ -65,13 +66,17 @@ func (l *tcpLink) run(c *Client) {
 		backoff = time.Second
 		l.up.Store(true)
 		c.wake()
-		l.serve(c, conn)
+		n := l.serve(c, conn)
+		dbg("tcp link %s down after %d queries", l.addr, n)
 		l.up.Store(false)
+		// Answers to anything still in flight on that connection are gone: fail those queries
+		// now so their data goes out on other paths, rather than waiting out their timeouts.
+		c.linkDown(l)
 	}
 }
 
 // serve relays until the connection fails or the client closes.
-func (l *tcpLink) serve(c *Client, conn net.Conn) {
+func (l *tcpLink) serve(c *Client, conn net.Conn) (sent int) {
 	errc := make(chan struct{})
 	go func() {
 		defer close(errc)
@@ -82,6 +87,7 @@ func (l *tcpLink) serve(c *Client, conn net.Conn) {
 			// closes it so the link redials (resolvers drop idle TCP/53 anyway, RFC 7766).
 			conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 			if _, err := io.ReadFull(conn, hdr[:]); err != nil {
+				dbg("tcp link %s read err=%v", l.addr, err)
 				return
 			}
 			n := int(binary.BigEndian.Uint16(hdr[:]))
@@ -106,6 +112,7 @@ func (l *tcpLink) serve(c *Client, conn net.Conn) {
 			if _, err := conn.Write(append(framed, msg...)); err != nil {
 				return
 			}
+			sent++
 		}
 	}
 }
