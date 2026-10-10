@@ -520,6 +520,10 @@ func (c *Client) failLocked(q *pendingQuery, now time.Time, refused bool) {
 		p.probing = false
 		p.probeFails++
 	}
+	// A promoted name length that then fails repeatedly goes back to the safe length for good.
+	if p.nameLen > c.cfg.SafeQName && p.consec >= 2 {
+		p.nameLen, p.probeFails = c.cfg.SafeQName, 2
+	}
 	if refused && p.qtype == typeTXT {
 		// Some resolvers refuse TXT (seen in Iran): carry answers in AAAA records instead.
 		p.qtype = typeAAAA
@@ -659,6 +663,12 @@ func (c *Client) sendDataLocked(cs *clientSession, p *path, now time.Time, allow
 
 	cs.mu.Lock()
 	pn, plain, data, pkt := cs.build([]byte{hdr}, budget, now, 0)
+	if probe {
+		// Pad to the length under test (inside the seal), or a short probe would "prove" it.
+		for len(plain) < 1+budget {
+			plain = append(plain, frPadding)
+		}
+	}
 	dup := allowDup && pkt != nil && len(pkt.streams) > 0 && p.verified && !cs.hasData()
 	var ad [4]byte
 	binary.BigEndian.PutUint16(ad[:], cs.sid)

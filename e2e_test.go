@@ -509,3 +509,74 @@ func TestResetAfterFinIsNeverDialed(t *testing.T) {
 		t.Fatalf("dialed a stream reset after FIN %d times", n)
 	}
 }
+
+// nameLimiter forwards only queries whose name is at most max characters, like resolvers in
+// networks that drop long names; longer ones get SERVFAIL.
+func nameLimiter(t *testing.T, server string, max int) string {
+	front, _ := net.ListenPacket("udp", "127.0.0.1:0")
+	t.Cleanup(func() { front.Close() })
+	saddr, _ := net.ResolveUDPAddr("udp", server)
+	z, _ := parseZone(testZone)
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, from, err := front.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			msg := append([]byte(nil), buf[:n]...)
+			q, err := parseQuery(msg, z)
+			if err != nil {
+				continue
+			}
+			if end, _ := skipName(msg, hdrLen); end-hdrLen-2 > max {
+				front.WriteTo(appendAnswer(nil, q, rcodeServFail, nil), from)
+				continue
+			}
+			go func() {
+				back, _ := net.ListenPacket("udp", "127.0.0.1:0")
+				defer back.Close()
+				back.WriteTo(msg, saddr)
+				back.SetReadDeadline(time.Now().Add(3 * time.Second))
+				rb := make([]byte, 4096)
+				if m, _, err := back.ReadFrom(rb); err == nil {
+					front.WriteTo(rb[:m], from)
+				}
+			}()
+		}
+	}()
+	return front.LocalAddr().String()
+}
+
+func TestNameProbeRespectsShortNameLimit(t *testing.T) {
+	srv, pub := startServer(t)
+	origin := startOrigin(t)
+	c, _ := NewClient(Config{Zone: testZone, ServerKey: pub, Resolvers: []string{nameLimiter(t, srv, 101)}})
+	defer c.Close()
+	for range 5 {
+		fetch(t, c, origin, 2000)
+	}
+	// An upload large enough to need full-size queries must still get through.
+	conn, err := c.DialContext(context.Background(), "tcp", origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(20 * time.Second))
+	up := make([]byte, 20<<10)
+	rand.Read(up)
+	go func() {
+		conn.Write([]byte("echo\n"))
+		conn.Write(up)
+	}()
+	got := make([]byte, len(up))
+	if _, err := io.ReadFull(conn, got); err != nil {
+		t.Fatalf("upload through a 101-char resolver: %v", err)
+	}
+	c.mu.Lock()
+	nameLen := c.paths[0].nameLen
+	c.mu.Unlock()
+	if nameLen > 101 {
+		t.Fatalf("path promoted to %d-char names through a 101-char resolver", nameLen)
+	}
+}
