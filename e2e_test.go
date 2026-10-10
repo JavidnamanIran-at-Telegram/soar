@@ -246,7 +246,7 @@ func TestPublicOnly(t *testing.T) {
 		"100.64.0.1:80": false, "[::1]:443": false, "[fd00::1]:80": false, "0.0.0.0:80": false,
 		"0.1.2.3:80": false, "[::ffff:127.0.0.1]:80": false, "[64:ff9b::7f00:1]:80": false,
 		"[64:ff9b::a9fe:a9fe]:80": false, "[2002:7f00:1::]:80": false, "[2001:0:1::1]:80": false,
-		"[::127.0.0.1]:80": false, "[::ffff:0:7f00:1]:80": false, "[64:ff9b::808:808]:443": true, "[2002:808:808::]:443": true,
+		"[::127.0.0.1]:80": false, "[2606:4700::1111%eth0]:443": false, "[64:ff9b::7f00:1%lo0]:80": false, "[::ffff:0:7f00:1]:80": false, "[64:ff9b::808:808]:443": true, "[2002:808:808::]:443": true,
 		"8.8.8.8:443": true, "[2606:4700::1111]:443": true,
 	} {
 		if err := PublicOnly("tcp", addr, nil); (err == nil) != ok {
@@ -481,5 +481,31 @@ func TestResetStreamIsNeverDialed(t *testing.T) {
 	ss.serveStream(st)
 	if n := dials.Load(); n != 0 {
 		t.Fatalf("dialed a reset stream %d times", n)
+	}
+}
+
+func TestResetAfterFinIsNeverDialed(t *testing.T) {
+	var dials atomic.Int32
+	srv := &Server{ctx: context.Background(), cfg: ServerConfig{Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dials.Add(1)
+		return nil, errors.New("unreachable")
+	}, Logger: slog.New(slog.DiscardHandler)}}
+	ss := &srvSession{session: newSession(false, streamConfig{StreamWindow: 1 << 16, SendBuffer: 1 << 16, MaxStreams: 4}, nil, nil), srv: srv}
+	dest := "example.com:443"
+	var pkt []byte
+	pkt = appendStream(pkt, 0, 0, append([]byte{byte(len(dest))}, dest...), true, false)
+	pkt = ctrl{typ: frReset, id: 0}.appendTo(pkt)
+	ss.mu.Lock()
+	if _, err := ss.receive(0, pkt, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	st := ss.streams[0]
+	ss.mu.Unlock()
+	if st == nil {
+		t.Skip("stream already removed")
+	}
+	ss.serveStream(st)
+	if n := dials.Load(); n != 0 {
+		t.Fatalf("dialed a stream reset after FIN %d times", n)
 	}
 }

@@ -464,7 +464,7 @@ func (ss *srvSession) serveStream(st *stream) {
 	// The dial dies with the stream: a reset (even one in the same packet as the destination)
 	// releases the stream's quota, so its dial must not outlive it.
 	ss.mu.Lock()
-	gone := st.reset || st.rclosed
+	gone := st.reset || st.rclosed || st.saborted
 	ss.mu.Unlock()
 	if gone {
 		c.Close()
@@ -530,6 +530,11 @@ func PublicOnly(network, address string, _ syscall.RawConn) error {
 		return err
 	}
 	a := ap.Addr()
+	// A zone survives Unmap and defeats prefix and own-address matching; a public destination
+	// never needs one.
+	if a.Zone() != "" {
+		return fmt.Errorf("soar: destination %s has a zone", a)
+	}
 	if v4, ok := embeddedV4(a); ok && isLocal(v4) {
 		return fmt.Errorf("soar: destination %s is not public", a)
 	}
