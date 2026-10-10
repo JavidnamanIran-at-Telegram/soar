@@ -988,10 +988,10 @@ func TestForgedErrorsDoNotCutQueriesShort(t *testing.T) {
 			}
 			c.mu.Lock()
 			p := c.paths[0]
-			qtype, limit := p.qtype, p.limitClass
+			qtype, ceil := p.qtype, p.sizeCeil
 			c.mu.Unlock()
-			if qtype != typeTXT || limit != limitClasses-1 {
-				t.Fatalf("forged answers changed the path: qtype=%d limitClass=%d", qtype, limit)
+			if qtype != typeTXT || ceil != limitClasses {
+				t.Fatalf("forged answers changed the path: qtype=%d sizeCeil=%d", qtype, ceil)
 			}
 		})
 	}

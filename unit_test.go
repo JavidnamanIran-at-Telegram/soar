@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	mrand "math/rand/v2"
 	"os"
 	"strings"
 	"testing"
@@ -490,5 +491,43 @@ func TestFragmentedReassemblyIsBounded(t *testing.T) {
 	}
 	if d := time.Since(start); d > time.Second {
 		t.Fatalf("fragment flood took %v", d)
+	}
+}
+
+// drive sends n queries on p, deciding each one's fate from its class.
+func drive(p *path, n int, now time.Time, lost func(class, i int) bool) {
+	for i := range n {
+		c := p.nextClass()
+		p.sizeOutcome(c, lost(c, i), now)
+	}
+}
+
+func TestAnswerSizeTrialThenDemotionWhenPolicingStarts(t *testing.T) {
+	now := time.Now()
+	p := &path{sizeCeil: limitClasses, maxClass: limitClasses - 1}
+	drive(p, 200, now, func(int, int) bool { return false }) // everything arrives
+	if p.sizeOK != limitClasses-1 {
+		t.Fatalf("clean path not promoted to the largest size: sizeOK=%d test=%d", p.sizeOK, p.test)
+	}
+	// Policing starts: large answers vanish, 512-byte canaries still arrive.
+	drive(p, 200, now, func(c, _ int) bool { return c > 0 })
+	if p.sizeOK != 0 || p.sizeCeil != limitClasses-1 || !p.sizeBlocked.After(now) {
+		t.Fatalf("not demoted: sizeOK=%d ceil=%d", p.sizeOK, p.sizeCeil)
+	}
+}
+
+func TestEvenLossNeverMovesAnswerSize(t *testing.T) {
+	now := time.Now()
+	// A rate limit drops a third of queries whatever their size: a trial still passes...
+	rng := mrand.New(mrand.NewPCG(1, 2))
+	p := &path{sizeCeil: limitClasses, maxClass: limitClasses - 1}
+	drive(p, 300, now, func(int, int) bool { return rng.Float64() < 0.33 })
+	if p.sizeOK != limitClasses-1 {
+		t.Fatalf("size-blind loss failed the trial: sizeOK=%d ceil=%d", p.sizeOK, p.sizeCeil)
+	}
+	// ...and a proven size isn't demoted by it.
+	drive(p, 300, now, func(int, int) bool { return rng.Float64() < 0.33 })
+	if p.sizeOK != limitClasses-1 {
+		t.Fatalf("size-blind loss demoted the proven size to %d", p.sizeOK)
 	}
 }

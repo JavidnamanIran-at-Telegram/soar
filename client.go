@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"sync"
 	"time"
@@ -33,13 +34,25 @@ type Config struct {
 	MaxInflight int
 	// MaxPathWindow caps one path's queries outstanding. Default 32.
 	MaxPathWindow int
-	StreamWindow  uint64 // per-stream receive window. Default 256 KiB.
-	SendBuffer    int    // per-stream send buffer. Default 64 KiB.
-	MaxStreams    int    // Default 64.
+	// MaxAnswer caps the DNS answer size (bytes) paths may probe up to. Every path starts at 512,
+	// which every network delivers, and grows only while larger answers keep arriving: some
+	// networks silently drop large DNS responses (they look like amplification). Default 1232.
+	MaxAnswer    int
+	StreamWindow uint64 // per-stream receive window. Default 256 KiB.
+	SendBuffer   int    // per-stream send buffer. Default 64 KiB.
+	MaxStreams   int    // Default 64.
 	// TCP controls TCP/53 paths: "auto" (default) adds one for a resolver whose UDP path never
 	// answers, "on" adds one for every resolver up front, "off" never does.
 	TCP    string
 	Logger *slog.Logger
+}
+
+// maxLimitClass is the answer-size class for MaxAnswer (512 + 48*class bytes).
+func (c *Config) maxLimitClass() int {
+	if c.MaxAnswer <= 0 {
+		return limitClasses - 1
+	}
+	return min(max((c.MaxAnswer-512)/48, 0), limitClasses-1)
 }
 
 func (c *Config) setDefaults() {
@@ -136,8 +149,20 @@ type path struct {
 	probing    bool
 	successes  int
 
-	limitClass int
-	lastHello  time.Time
+	// Answer size (class: 512+48*class bytes). sizeOK is the largest class shown to arrive and
+	// sizeCeil the smallest shown not to (or one past maxClass). While probing, test is the class
+	// under trial; queries alternate between it and sizeOK so the two are judged side by side.
+	sizeOK      int
+	sizeCeil    int
+	maxClass    int
+	test        int       // class on trial (0: none)
+	sizeBlocked time.Time // no probing until then
+	sizeSince   int       // successes at sizeOK since the last change
+	sizeFails   int       // consecutive failed trials, for backoff
+	testWin     outcomes  // outcomes at the class on trial (or at sizeOK, when guarding it)
+	baseWin     outcomes  // outcomes of the comparison queries sent alongside
+	alt         int
+	lastHello   time.Time
 
 	verified    bool // has answered at least once
 	lastSuccess time.Time
@@ -160,6 +185,7 @@ type pendingQuery struct {
 	scout    bool   // carries no data: a hello or a probe of an unverified path
 	errRcode int    // an error answer arrived (-1: none); it may be forged, so we keep waiting
 	errTC    bool   // that answer was truncated
+	class    int    // the answer-size class this query asked for
 }
 
 type clientSession struct {
@@ -247,7 +273,7 @@ func (c *Client) addPathLocked(r string) error {
 
 func (c *Client) newPath(ua *net.UDPAddr, tcp bool) *path {
 	p := &path{addr: ua, cwnd: 4, ssthresh: float64(c.cfg.MaxPathWindow), created: time.Now(),
-		nameLen: c.cfg.SafeQName, limitClass: limitClasses - 1, qtype: typeTXT}
+		nameLen: c.cfg.SafeQName, sizeCeil: c.cfg.maxLimitClass() + 1, maxClass: c.cfg.maxLimitClass(), qtype: typeTXT}
 	if tcp {
 		p.tcp = c.startTCP(ua.String())
 	}
@@ -487,6 +513,169 @@ func (p *path) onLoss(now time.Time) {
 	}
 }
 
+func (c *Client) anyUsableLocked(now time.Time) bool {
+	for _, o := range c.paths {
+		if o.verified && o.usable(now) {
+			return true
+		}
+	}
+	return false
+}
+
+// Answer-size control works like path-MTU discovery, but every verdict is a side-by-side
+// comparison, because the losses that matter here are size-specific: some networks silently drop
+// large DNS answers (they look like amplification), sometimes only once there's volume. Rate
+// limits, random loss and outages hit small and large answers alike and must not move the size.
+//
+// Trial: once sizeOK has earned it, queries alternate between a larger class and sizeOK — the
+// largest allowed first, then binary search below a failure. The trial passes if the larger class
+// loses about as much as sizeOK did meanwhile, and fails if it loses clearly more.
+// Guard: at a proven size above 512, every 4th query is a 512-byte canary; if the proven size
+// starts losing clearly more than the canaries, it fails the same way.
+const (
+	trialSamples = 16 // outcomes per side before a trial can pass
+	earnTrial    = 8  // successes at sizeOK before a trial
+)
+
+// worse reports whether a loses significantly more than b: by over a quarter of queries and by
+// more than 3 standard errors of the difference, so loss that hits both alike never counts.
+// Callers judge once per full window, not after every outcome, so noise gets few chances.
+func worse(a, b *outcomes) bool {
+	ka, kb := a.lostCount(), b.lostCount()
+	gap := float64(ka)/float64(a.n) - float64(kb)/float64(b.n)
+	pool := float64(ka+kb) / float64(a.n+b.n)
+	se := math.Sqrt(pool * (1 - pool) * (1/float64(a.n) + 1/float64(b.n)))
+	return gap > max(0.25, 3*se)
+}
+
+// blatant catches heavy size-specific loss early, at fixed checkpoints so chance gets few
+// tries: nearly all large answers lost while every small one arrived.
+func blatant(a, b *outcomes) bool {
+	return (a.n == 8 || a.n == 16 || a.n == 24) && b.n >= 4 && a.lostCount()*8 >= a.n*7 && b.lostCount() == 0
+}
+
+func (p *path) nextClass() int {
+	p.alt++
+	switch {
+	case p.test > 0:
+		if p.alt%2 == 0 {
+			return p.test
+		}
+		return p.sizeOK
+	case p.sizeOK > 0 && p.alt%4 == 0:
+		return 0
+	}
+	return p.sizeOK
+}
+
+func (p *path) sizeOutcome(class int, lost bool, now time.Time) {
+	switch {
+	case p.test > 0: // a trial
+		switch class {
+		case p.test:
+			p.testWin.record(lost)
+		case p.sizeOK:
+			p.baseWin.record(lost)
+		default:
+			return
+		}
+		full := p.testWin.n >= 2*trialSamples && p.baseWin.n >= 2*trialSamples
+		switch {
+		case blatant(&p.testWin, &p.baseWin) || full && worse(&p.testWin, &p.baseWin):
+			p.sizeFailed(p.test, p.sizeOK, now)
+		case full: // not measurably worse: keep the larger size
+			p.sizeOK, p.test, p.sizeSince, p.sizeFails = p.test, 0, 0, 0
+			p.testWin, p.baseWin = outcomes{}, outcomes{}
+		}
+	case p.sizeOK > 0 && (class == p.sizeOK || class == 0): // guarding a proven size
+		if class == 0 {
+			p.baseWin.record(lost)
+		} else {
+			p.testWin.record(lost)
+		}
+		full := p.testWin.n >= len(p.testWin.lost) && p.baseWin.n >= 8
+		if blatant(&p.testWin, &p.baseWin) || full && worse(&p.testWin, &p.baseWin) {
+			p.sizeFailed(p.sizeOK, 0, now)
+			return
+		}
+		if full {
+			p.testWin, p.baseWin = outcomes{}, outcomes{}
+		}
+		fallthrough
+	default:
+		if class == p.sizeOK && !lost {
+			p.sizeSince++
+		}
+		if p.test == 0 && p.sizeSince >= earnTrial && now.After(p.sizeBlocked) && p.sizeOK+1 < p.sizeCeil {
+			if p.sizeCeil > p.maxClass { // nothing has failed yet: try the largest
+				p.test = p.maxClass
+			} else {
+				p.test = (p.sizeOK + p.sizeCeil) / 2
+			}
+			if p.test <= p.sizeOK {
+				p.test = 0
+				return
+			}
+			p.testWin, p.baseWin = outcomes{}, outcomes{}
+		}
+	}
+}
+
+// sizeFailed records that answers of class don't arrive: it becomes the ceiling and the path
+// falls back to class back. Trials back off exponentially, since whatever polices large answers
+// may penalise repeat offenders and a bigger size isn't worth provoking it.
+func (p *path) sizeFailed(class, back int, now time.Time) {
+	p.sizeCeil = min(p.sizeCeil, max(class, 1))
+	p.sizeOK = min(back, p.sizeCeil-1)
+	p.test, p.sizeSince = 0, 0
+	p.testWin, p.baseWin = outcomes{}, outcomes{}
+	backoff := min(10*time.Second*time.Duration(1<<(2*min(p.sizeFails, 4))), 30*time.Minute)
+	p.sizeBlocked = now.Add(backoff)
+	p.sizeFails++
+}
+
+// outcomes is a small sliding window of query fates.
+type outcomes struct {
+	lost [32]bool
+	i, n int
+}
+
+func (o *outcomes) lostCount() int {
+	k := 0
+	for j := range o.n {
+		if o.lost[j] {
+			k++
+		}
+	}
+	return k
+}
+
+func (o *outcomes) record(lost bool) {
+	o.lost[o.i] = lost
+	o.i = (o.i + 1) % len(o.lost)
+	o.n = min(o.n+1, len(o.lost))
+}
+
+func (o *outcomes) rate() float64 {
+	if o.n == 0 {
+		return 0
+	}
+	k := 0
+	for j := range o.n {
+		if o.lost[j] {
+			k++
+		}
+	}
+	return float64(k) / float64(o.n)
+}
+
+// sizeTruncated: an answer of this class came back truncated (TC), so it's too big here.
+func (p *path) sizeTruncated(class int, now time.Time) {
+	if class > 0 {
+		p.sizeFailed(class, min(p.sizeOK, class-1), now)
+	}
+}
+
 func (c *Client) expireLocked(now time.Time) {
 	for txn, q := range c.pending {
 		if q.expired {
@@ -502,7 +691,7 @@ func (c *Client) expireLocked(now time.Time) {
 		}
 		q.expired = true
 		if q.errTC {
-			q.p.limitClass = max(0, q.p.limitClass-4) // answers this size get truncated here
+			q.p.sizeTruncated(q.class, now) // answers this size get truncated here
 		}
 		c.failLocked(q, now, q.errRcode == rcodeRefused)
 	}
@@ -546,6 +735,12 @@ func (c *Client) failLocked(q *pendingQuery, now time.Time, refused bool) {
 			p.consec += 2
 		}
 		p.onLoss(now)
+		p.sizeOutcome(q.class, true, now)
+		// Never suspend every path: with nothing in flight nothing can recover, and the
+		// session would be presumed lost. The last usable one keeps probing at a window of 1.
+		if p.suspended.After(now) && !c.anyUsableLocked(now) {
+			p.suspended = time.Time{}
+		}
 	}
 	if q.hello || q.sess == nil || q.sess.session == nil {
 		return
@@ -689,7 +884,8 @@ func (c *Client) sendDataLocked(cs *clientSession, p *path, now time.Time, allow
 		budget = minPlain // probe: don't strand data on a path that may be dead
 	}
 	holdClass := min(int(c.cfg.Hold/(100*time.Millisecond)), 15)
-	hdr := byte(holdClass<<4 | p.limitClass)
+	class := p.nextClass()
+	hdr := byte(holdClass<<4 | class)
 
 	cs.mu.Lock()
 	pn, plain, data, pkt := cs.build([]byte{hdr}, budget, now, 0)
@@ -718,7 +914,7 @@ func (c *Client) sendDataLocked(cs *clientSession, p *path, now time.Time, allow
 	if cs.unanswered.IsZero() {
 		cs.unanswered = now
 	}
-	c.sendLocked(p, &pendingQuery{p: p, sess: cs, pn: pn, probe: probe, scout: !p.verified}, payload, now, timeout)
+	c.sendLocked(p, &pendingQuery{p: p, sess: cs, pn: pn, probe: probe, scout: !p.verified, class: class}, payload, now, timeout)
 	// The tail of an upload (often a whole request) goes out twice, on another path if there is one.
 	if dup {
 		// A different resolver, so the copies don't share a failure; the same one if it's all we have.
@@ -748,6 +944,7 @@ func (c *Client) sendLocked(p *path, q *pendingQuery, payload []byte, now time.T
 	q.question = msg[hdrLen : end+4]
 	q.sent, q.deadline = now, now.Add(timeout)
 	q.seq = p.nextSeq
+
 	p.nextSeq++
 	c.pending[q.txn] = q
 	p.inflight++
@@ -866,6 +1063,7 @@ func (c *Client) onAnswer(msg []byte) {
 		p.nameLen = c.cfg.MaxQName
 	}
 	p.onSuccess(now, now.Sub(q.sent)-held, c.cfg.MaxPathWindow)
+	p.sizeOutcome(q.class, false, now)
 }
 
 func (c *Client) onHelloLocked(q *pendingQuery, reply []byte, now time.Time) {
