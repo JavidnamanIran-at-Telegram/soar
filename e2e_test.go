@@ -370,3 +370,52 @@ func TestServerRestartSignedUnknownSession(t *testing.T) {
 		}
 	}
 }
+
+func TestServerRestartUnsignedRecovery(t *testing.T) {
+	if testing.Short() {
+		t.Skip("waits out the liveness timeout")
+	}
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pc, _ := net.ListenPacket("udp", "127.0.0.1:0")
+	addr := pc.LocalAddr().String()
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	go Serve(ctx1, pc, ServerConfig{Zone: testZone, PrivateKey: priv, Dial: loopbackDial})
+	origin := startOrigin(t)
+	c, _ := NewClient(Config{Zone: testZone, ServerKey: pub, Resolvers: []string{nxInjector(t, addr)}})
+	defer c.Close()
+	fetch(t, c, origin, 10<<10)
+	cancel1()
+	time.Sleep(100 * time.Millisecond)
+	// The new server never signs, as if its signing budget were exhausted.
+	pc2, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	t.Cleanup(cancel2)
+	go func() {
+		buf := make([]byte, 4096)
+		go func() { <-ctx2.Done(); pc2.Close() }()
+		for {
+			n, from, err := pc2.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			if q, err := parseQuery(buf[:n], zone{}); err == nil {
+				pc2.WriteTo(appendAnswer(nil, q, rcodeNXDomain, nil), from)
+			}
+		}
+	}()
+	start := time.Now()
+	for time.Since(start) < 25*time.Second {
+		c.mu.Lock()
+		dead := c.sess != nil && c.sess.isClosed()
+		c.mu.Unlock()
+		if dead {
+			t.Logf("session presumed lost after %v", time.Since(start).Round(time.Second))
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatal("session never presumed lost")
+}

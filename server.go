@@ -395,7 +395,7 @@ func (ss *srvSession) answerPktLocked(hq *heldQuery, now time.Time) (sendItem, *
 	dbg("srv answer pn=%d up=%d plain=%x", pn, hq.upPN, plain)
 	var hdr [2]byte
 	binary.BigEndian.PutUint16(hdr[:], uint16(pn))
-	sealed := ss.seal.seal(nil, hdr[:], plain, pn)
+	sealed := ss.seal.seal(nil, downAD(hdr, hq.upPN), plain, pn)
 	m := ss.seal.mask(sealed)
 	payload := make([]byte, 0, 2+len(sealed))
 	payload = append(payload, hdr[0]^m[0], hdr[1]^m[1])
@@ -411,7 +411,7 @@ func (ss *srvSession) emptyAnswerLocked(hq *heldQuery, now time.Time) sendItem {
 	plain := make([]byte, 2+minPlain)
 	var hdr [2]byte
 	binary.BigEndian.PutUint16(hdr[:], uint16(pn))
-	sealed := ss.seal.seal(nil, hdr[:], plain, pn)
+	sealed := ss.seal.seal(nil, downAD(hdr, hq.upPN), plain, pn)
 	m := ss.seal.mask(sealed)
 	payload := append([]byte{hdr[0] ^ m[0], hdr[1] ^ m[1]}, sealed...)
 	return sendItem{msg: appendAnswer(make([]byte, 0, 128), hq.q, rcodeOK, payload), addr: hq.addr}

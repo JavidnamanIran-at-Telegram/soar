@@ -46,6 +46,8 @@ type stream struct {
 	resetErr error
 
 	readCh, writeCh chan struct{}
+	dead            chan struct{} // closed when the stream is closed locally or aborted
+	deadClosed      bool
 	rdl, wdl        deadline
 }
 
@@ -54,7 +56,7 @@ func newStream(s *session, id uint64) *stream {
 		id: id, s: s,
 		smax: initialWindow, scap: s.cfg.SendBuffer,
 		rwin: s.cfg.StreamWindow, rmax: initialWindow,
-		readCh: make(chan struct{}, 1), writeCh: make(chan struct{}, 1),
+		readCh: make(chan struct{}, 1), writeCh: make(chan struct{}, 1), dead: make(chan struct{}),
 	}
 }
 
@@ -207,6 +209,15 @@ func (st *stream) abort(err error) {
 	st.reset, st.resetErr = true, err
 	st.sbuf, st.spending, st.sacked = nil, nil, nil
 	st.rooo, st.rgot = nil, nil
+	st.kill()
+}
+
+// kill wakes every blocked Read and Write for good. Caller holds s.mu.
+func (st *stream) kill() {
+	if !st.deadClosed {
+		st.deadClosed = true
+		close(st.dead)
+	}
 	signal(st.readCh)
 	signal(st.writeCh)
 }
@@ -258,7 +269,7 @@ func (c *Conn) Read(p []byte) (int, error) {
 			return 0, net.ErrClosed
 		}
 		s.mu.Unlock()
-		if err := st.rdl.wait(st.readCh, s.done); err != nil {
+		if err := st.rdl.wait(st.readCh, s.done, st.dead); err != nil {
 			return 0, err
 		}
 	}
@@ -289,7 +300,7 @@ func (c *Conn) Write(p []byte) (int, error) {
 			continue
 		}
 		s.mu.Unlock()
-		if err := st.wdl.wait(st.writeCh, s.done); err != nil {
+		if err := st.wdl.wait(st.writeCh, s.done, st.dead); err != nil {
 			return written, err
 		}
 	}
@@ -321,9 +332,8 @@ func (c *Conn) Close() error {
 		}
 	}
 	s.maybeRemove(st)
+	st.kill()
 	s.mu.Unlock()
-	signal(st.readCh)
-	signal(st.writeCh)
 	s.wake()
 	return nil
 }
@@ -363,31 +373,30 @@ func (d *deadline) set(t time.Time) {
 	d.mu.Unlock()
 }
 
-// wait blocks until ch is signaled, the deadline passes, or done closes.
-func (d *deadline) wait(ch <-chan struct{}, done <-chan struct{}) error {
+// wait blocks until ch is signaled, the deadline passes, or done closes. When dead closes it
+// returns nil, so the caller rechecks the stream's state and reports why.
+func (d *deadline) wait(ch, done, dead <-chan struct{}) error {
 	d.mu.Lock()
 	t := d.t
 	d.mu.Unlock()
-	if t.IsZero() {
-		select {
-		case <-ch:
-			return nil
-		case <-done:
-			return ErrClosed
+	var timeout <-chan time.Time
+	if !t.IsZero() {
+		dur := time.Until(t)
+		if dur <= 0 {
+			return os.ErrDeadlineExceeded
 		}
+		timer := time.NewTimer(dur)
+		defer timer.Stop()
+		timeout = timer.C
 	}
-	dur := time.Until(t)
-	if dur <= 0 {
-		return os.ErrDeadlineExceeded
-	}
-	timer := time.NewTimer(dur)
-	defer timer.Stop()
 	select {
 	case <-ch:
 		return nil
+	case <-dead:
+		return nil
 	case <-done:
 		return ErrClosed
-	case <-timer.C:
+	case <-timeout:
 		return os.ErrDeadlineExceeded
 	}
 }

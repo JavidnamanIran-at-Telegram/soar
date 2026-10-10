@@ -135,6 +135,13 @@ func sessionCiphers(ee, transcript []byte) (up, down *packetCipher, err error) {
 	return up, down, err
 }
 
+// downAD is a downstream packet's associated data: its truncated packet number on the wire, and,
+// implicitly, the upstream packet number of the query it answers, so a valid answer can't be
+// replayed onto another query (which would falsely acknowledge that query's data).
+func downAD(trunc [2]byte, upPN uint64) []byte {
+	return binary.BigEndian.AppendUint64(trunc[:], upPN)
+}
+
 // unknownSessionMsg is what the server signs to say a query's session doesn't exist: the
 // question, lower-cased since resolvers may randomize case on the way to us.
 func unknownSessionMsg(question []byte) []byte {

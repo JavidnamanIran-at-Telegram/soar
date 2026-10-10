@@ -195,7 +195,10 @@ func (c *Client) discoverLocked(now time.Time) {
 		switch {
 		case p.verified:
 			verified++
-		case p.candidate && p.outN >= 3 && p.inflight == 0:
+		case p.candidate && (p.outN >= 3 && p.inflight == 0 || p.tcp != nil && now.Sub(p.created) > 10*time.Second):
+			if p.tcp != nil {
+				p.tcp.stop()
+			}
 			continue // never answered: drop it
 		case p.candidate:
 			probing++

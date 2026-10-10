@@ -266,3 +266,40 @@ func TestAckAfterPeerResetDoesNotPanic(t *testing.T) {
 	other.abort(ErrStreamReset)
 	other.onAcked(0, 20, true)
 }
+
+func TestCloseWakesAllBlockedReaders(t *testing.T) {
+	s, st := newTestStream(t)
+	_ = s
+	c := &Conn{st: st}
+	errs := make(chan error, 4)
+	for range 4 {
+		go func() {
+			_, err := c.Read(make([]byte, 10))
+			errs <- err
+		}()
+	}
+	time.Sleep(50 * time.Millisecond)
+	c.Close()
+	for range 4 {
+		select {
+		case err := <-errs:
+			if err == nil {
+				t.Fatal("Read returned no error after Close")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("a blocked Read never woke after Close")
+		}
+	}
+}
+
+func TestReplayedAnswerFailsForAnotherQuery(t *testing.T) {
+	c := &packetCipher{}
+	trunc := [2]byte{0, 5}
+	sealed := c.seal(nil, downAD(trunc, 10), []byte("answer to query 10"), 5)
+	if _, err := c.open(downAD(trunc, 10), sealed, 5); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.open(downAD(trunc, 11), sealed, 5); err == nil {
+		t.Fatal("answer to query 10 authenticated as an answer to query 11")
+	}
+}

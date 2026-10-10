@@ -113,7 +113,8 @@ type path struct {
 	tcp       *tcpLink // nil for UDP
 	sibling   bool     // a TCP path was added for this UDP path
 	candidate bool     // added by discovery; pruned if it never answers
-	qtype     uint16   // record type carrying answers: TXT, or AAAA where TXT is refused
+	created   time.Time
+	qtype     uint16 // record type carrying answers: TXT, or AAAA where TXT is refused
 	srtt      time.Duration
 	rttvar    time.Duration
 	hasRTT    bool
@@ -165,6 +166,7 @@ type clientSession struct {
 	ready       chan struct{}
 	established bool
 	backlog     int
+	lastAuth    time.Time // last authenticated answer; guarded by Client.mu
 }
 
 func (cs *clientSession) isClosed() bool {
@@ -231,7 +233,7 @@ func (c *Client) addPathLocked(r string) error {
 }
 
 func (c *Client) newPath(ua *net.UDPAddr, tcp bool) *path {
-	p := &path{addr: ua, cwnd: 4, ssthresh: float64(c.cfg.MaxPathWindow),
+	p := &path{addr: ua, cwnd: 4, ssthresh: float64(c.cfg.MaxPathWindow), created: time.Now(),
 		nameLen: c.cfg.SafeQName, limitClass: limitClasses - 1, qtype: typeTXT}
 	if tcp {
 		p.tcp = c.startTCP(ua.String())
@@ -248,7 +250,9 @@ func (c *Client) addTCPSiblingsLocked() {
 	for _, p := range c.paths {
 		if p.tcp == nil && !p.sibling && !p.verified && p.outN >= 2 {
 			p.sibling = true
-			c.paths = append(c.paths, c.newPath(p.addr, true))
+			tp := c.newPath(p.addr, true)
+			tp.candidate = p.candidate
+			c.paths = append(c.paths, tp)
 		}
 	}
 }
@@ -337,6 +341,7 @@ func (c *Client) run() {
 		now := time.Now()
 		c.mu.Lock()
 		c.expireLocked(now)
+		c.checkLivenessLocked(now)
 		c.discoverLocked(now)
 		c.addTCPSiblingsLocked()
 		c.fillLocked(now)
@@ -477,6 +482,24 @@ func (c *Client) expireLocked(now time.Time) {
 		}
 		q.expired = true
 		c.failLocked(q, now, q.errRcode == rcodeRefused)
+	}
+}
+
+// deadSessionAfter ends a session that gets no authenticated answer for this long while queries
+// are outstanding. The server's signed "unknown session" reply is the fast path, but its signing
+// is rate-limited, so this is what guarantees recovery when the server forgot us.
+const deadSessionAfter = 15 * time.Second
+
+func (c *Client) checkLivenessLocked(now time.Time) {
+	cs := c.sess
+	if cs == nil || !cs.established || now.Sub(cs.lastAuth) < deadSessionAfter {
+		return
+	}
+	for _, q := range c.pending {
+		if q.sess == cs && !q.hello && q.sent.After(cs.lastAuth) {
+			cs.close(errors.New("soar: no authenticated answers; session presumed lost"))
+			return
+		}
 	}
 }
 
@@ -725,7 +748,6 @@ func (c *Client) onAnswer(msg []byte) {
 	}
 	p := q.p
 	late := q.expired
-	p.maxAnswered = max(p.maxAnswered, q.seq+1)
 	if a.tc || a.rcode != rcodeOK || !a.hasTXT {
 		if a.rcode == rcodeNXDomain {
 			// Only a reply the server signed over this question ends the session; an unsigned
@@ -781,13 +803,15 @@ func (c *Client) onAnswer(msg []byte) {
 	ad := [2]byte{a.txt[0] ^ m[0], a.txt[1] ^ m[1]}
 	cs.mu.Lock()
 	pn := decodePN(cs.largestRecv, cs.haveRecv, binary.BigEndian.Uint16(ad[:]))
-	plain, err := cs.open.open(ad[:], sealed, pn)
+	plain, err := cs.open.open(downAD(ad, q.pn), sealed, pn)
 	if err != nil || len(plain) < 2 {
 		cs.mu.Unlock()
 		dbg("cli auth fail pn=%d err=%v", pn, err)
 		return // forged or corrupt: keep waiting for the real answer
 	}
 	delete(c.pending, a.txn)
+	cs.lastAuth = now
+	p.maxAnswered = max(p.maxAnswered, q.seq+1)
 	dbg("cli recv pn=%d for up=%d plain=%x", pn, q.pn, plain)
 	held := time.Duration(plain[0]) * 10 * time.Millisecond
 	cs.backlog = int(plain[1])
@@ -829,5 +853,6 @@ func (c *Client) onHelloLocked(q *pendingQuery, reply []byte, now time.Time) {
 	cs.wakeFn = c.wake
 	cs.sid = sid
 	cs.established = true
+	cs.lastAuth = now
 	close(cs.ready)
 }
