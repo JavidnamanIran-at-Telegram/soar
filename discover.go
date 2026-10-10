@@ -185,9 +185,15 @@ func sampleRanges(specs []string, n int) []string {
 // storeCache writes verified-resolver snapshots to the cache one at a time, in order, so a
 // cache needn't be safe for concurrent use and an older snapshot never lands last.
 func (c *Client) storeCache(cache ResolverCache) {
+	defer close(c.cacheDone)
 	for {
 		select {
 		case <-c.done:
+			select { // flush the newest snapshot, if one is still queued
+			case good := <-c.cacheQ:
+				cache.Store(good)
+			default:
+			}
 			return
 		case good := <-c.cacheQ:
 			cache.Store(good)

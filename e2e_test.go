@@ -250,6 +250,7 @@ func TestPublicOnly(t *testing.T) {
 		"0.1.2.3:80": false, "[::ffff:127.0.0.1]:80": false, "[64:ff9b::7f00:1]:80": false,
 		"[64:ff9b::a9fe:a9fe]:80": false, "[2002:7f00:1::]:80": false, "[2001:0:1::1]:80": false,
 		"[::127.0.0.1]:80": false, "[2606:4700::1111%eth0]:443": false, "[64:ff9b::7f00:1%lo0]:80": false, "[::ffff:0:7f00:1]:80": false, "[64:ff9b::808:808]:443": true, "[2002:808:808::]:443": true,
+		"192.0.2.1:443": false, "198.51.100.9:80": false, "203.0.113.5:443": false,
 		"8.8.8.8:443": true, "[2606:4700::1111]:443": true,
 	} {
 		if err := PublicOnly("tcp", addr, nil); (err == nil) != ok {
@@ -888,5 +889,36 @@ func TestAmplificationBudget(t *testing.T) {
 	}
 	if n > 2 || len(s.rrl) > maxRRLPrefixes {
 		t.Fatalf("overflow: %d allowed, table %d", n, len(s.rrl))
+	}
+}
+
+func TestSafeQNameMustFitHello(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	zone := strings.Repeat("z", 40) + ".example.com" // a hello needs ~55 chars, plus this
+	_, err := NewClient(Config{Zone: zone, ServerKey: pub, Resolvers: []string{"127.0.0.1:53"}})
+	if err == nil {
+		t.Fatal("SafeQName 101 accepted for a zone that pushes the hello past it")
+	}
+	c, err := NewClient(Config{Zone: zone, ServerKey: pub, Resolvers: []string{"127.0.0.1:53"}, SafeQName: 140})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+}
+
+func TestCloseFlushesNewestCacheSnapshot(t *testing.T) {
+	srv, pub := startServer(t)
+	origin := startOrigin(t)
+	good := lossyForwarder(t, srv, 0, 5*time.Millisecond, 0)
+	cache := &orderCache{}
+	c, _ := NewClient(Config{Zone: testZone, ServerKey: pub, Discovery: Discovery{
+		Enabled: true, Candidates: []string{good}, Cache: cache, noBundled: true,
+	}})
+	fetch(t, c, origin, 1000)
+	c.Close()
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if n := len(cache.stores); n == 0 || !slices.Contains(cache.stores[n-1], good) {
+		t.Fatalf("after Close the cache holds %v, want the verified %s", cache.stores, good)
 	}
 }

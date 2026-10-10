@@ -105,6 +105,7 @@ type Client struct {
 	lastCand       time.Time
 	cachedVerified int
 	cacheQ         chan []string // the latest verified set, for storeCache
+	cacheDone      chan struct{} // closed once storeCache has flushed and exited
 
 	lastDump time.Time
 }
@@ -192,6 +193,9 @@ func NewClient(cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	if z.maxPayload(cfg.SafeQName) < 2+pubLen {
+		return nil, errors.New("soar: SafeQName too short to carry a handshake under this zone")
+	}
 	if len(cfg.Resolvers) == 0 && !cfg.Discovery.Enabled {
 		return nil, errors.New("soar: no resolvers and discovery is off")
 	}
@@ -213,7 +217,7 @@ func NewClient(cfg Config) (*Client, error) {
 	if cfg.Discovery.Enabled {
 		c.cands = cfg.Discovery.candidates()
 		if cfg.Discovery.Cache != nil {
-			c.cacheQ = make(chan []string, 1)
+			c.cacheQ, c.cacheDone = make(chan []string, 1), make(chan struct{})
 			go c.storeCache(cfg.Discovery.Cache)
 		}
 	}
@@ -268,13 +272,20 @@ func (c *Client) addTCPSiblingsLocked() {
 // Close shuts the client down.
 func (c *Client) Close() error {
 	c.once.Do(func() {
-		close(c.done)
-		c.pc.Close()
+		// Under c.mu, so no snapshot is queued for the cache after the worker's final flush.
 		c.mu.Lock()
+		close(c.done)
 		if c.sess != nil && c.sess.session != nil {
 			c.sess.close(ErrClosed)
 		}
 		c.mu.Unlock()
+		c.pc.Close()
+		if c.cacheDone != nil {
+			select {
+			case <-c.cacheDone: // the newest verified set is stored
+			case <-time.After(2 * time.Second):
+			}
+		}
 	})
 	return nil
 }

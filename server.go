@@ -330,7 +330,6 @@ func (s *Server) handshake(j helloJob) {
 			return
 		}
 	}
-	defer s.mu.Unlock()
 	key := j.key
 	cfg := streamConfig{StreamWindow: s.cfg.StreamWindow, SendBuffer: s.cfg.SendBuffer, MaxStreams: s.cfg.MaxStreams}
 	ss := &srvSession{session: newSession(false, cfg, down, up), srv: s, sid: sid, lastSeen: time.Now(), created: time.Now()}
@@ -378,7 +377,8 @@ func (s *Server) handshake(j helloJob) {
 	s.sessions[sid] = ss
 	// Bounded by MaxSessions: entries go with their session (see evictUnusedLocked and sweep).
 	s.hellos[key] = &helloEntry{reply: reply, at: time.Now(), sid: sid}
-	s.reply(q, addr, rcodeOK, reply)
+	s.mu.Unlock()
+	s.reply(q, addr, rcodeOK, reply) // never write to the network holding s.mu
 }
 
 // evictUnusedLocked drops the oldest session that never sent a valid data packet, so a flood of
@@ -778,6 +778,9 @@ var nonPublic = []netip.Prefix{
 	netip.MustParsePrefix("100.64.0.0/10"),   // CGNAT
 	netip.MustParsePrefix("192.0.0.0/24"),    // IETF protocol assignments
 	netip.MustParsePrefix("198.18.0.0/15"),   // benchmarking
+	netip.MustParsePrefix("192.0.2.0/24"),    // TEST-NET-1 (RFC 5737)
+	netip.MustParsePrefix("198.51.100.0/24"), // TEST-NET-2
+	netip.MustParsePrefix("203.0.113.0/24"),  // TEST-NET-3
 	netip.MustParsePrefix("240.0.0.0/4"),     // reserved
 	netip.MustParsePrefix("::/96"),           // IPv4-compatible (deprecated)
 	netip.MustParsePrefix("64:ff9b:1::/48"),  // local-use NAT64
@@ -867,10 +870,14 @@ func (s *Server) sweep() {
 				idle := now.Sub(ss.lastSeen) > s.cfg.IdleTimeout || ss.closed ||
 					(!ss.used.Load() && now.Sub(ss.created) > 15*time.Second)
 				out := ss.drainLocked(now)
+				if idle {
+					// Close under the same lock the decision was made under, so a query that
+					// arrives meanwhile can't revive a session we then close.
+					ss.closeLocked(ErrClosed)
+				}
 				ss.mu.Unlock()
 				s.send(out)
 				if idle {
-					ss.close(ErrClosed)
 					s.mu.Lock()
 					// The sid may have been evicted and reused meanwhile: only remove this session.
 					if s.sessions[ss.sid] == ss {

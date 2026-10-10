@@ -1,5 +1,5 @@
 # RU IPv4 ranges from ripencc delegation stats (2026-10-10), the 2000 largest. Regenerate with:
-#   go run ./dnstunnel/data/genranges -cc RU -rir ripencc
+#   go run ./data/genranges -cc RU -rir ripencc
 5.136.0.0/13
 95.24.0.0/13
 178.64.0.0/13
