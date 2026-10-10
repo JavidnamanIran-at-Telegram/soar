@@ -1,0 +1,492 @@
+package seep
+
+import (
+	"errors"
+	"fmt"
+	"slices"
+	"sync"
+	"time"
+)
+
+// streamConfig bounds per-stream memory.
+type streamConfig struct {
+	StreamWindow uint64 // receive window per stream
+	SendBuffer   int    // bytes the app may buffer per stream
+	MaxStreams   int
+}
+
+// ctrl is a retransmittable control frame.
+type ctrl struct {
+	typ byte
+	id  uint64
+	val uint64
+}
+
+func (c ctrl) appendTo(b []byte) []byte {
+	b = append(b, c.typ)
+	switch c.typ {
+	case frClose:
+		return appendVarint(b, c.val)
+	default:
+		b = appendVarint(b, c.id)
+		return appendVarint(b, c.val)
+	}
+}
+
+type sentRange struct {
+	id     uint64
+	lo, hi uint64
+	fin    bool
+}
+
+type sentPkt struct {
+	pn      uint64
+	at      time.Time
+	streams []sentRange
+	ctrls   []ctrl
+	ack     rangeSet // ack ranges this packet conveyed
+	lost    []uint64 // lost pns this packet reported
+	replyTo uint64   // server: the upstream pn this packet answered
+}
+
+// session is the transport-independent half of a tunnel endpoint: streams, packet numbers,
+// acknowledgement and retransmission. The client and server drive it with their own carriers.
+type session struct {
+	mu     sync.Mutex
+	cfg    streamConfig
+	client bool
+	seal   *packetCipher
+	open   *packetCipher
+
+	nextPN uint64
+	sent   map[uint64]*sentPkt
+	ackRTT time.Duration // server: smoothed time from sending a packet to its ack
+
+	recvd       rangeSet // peer pns received, for dedup (trimmed below a window)
+	largestRecv uint64
+	haveRecv    bool
+	toAck       rangeSet // client: downstream pns the server hasn't been told about
+	lostQ       []uint64 // client: upstream pns to report lost
+	replyOf     map[uint64]uint64
+	rxData      bool // the last received packet carried stream or control frames
+
+	streams      map[uint64]*stream
+	closedIDs    rangeSet
+	nextStreamID uint64
+	rr           []uint64 // stream ids in round-robin order
+	ctrlQ        []ctrl
+
+	closed   bool
+	closeErr error
+	done     chan struct{}
+
+	wakeFn   func()
+	acceptFn func(*stream) // server: a new stream arrived
+	// onLostUnknown: the client reported an upstream pn lost that has no recorded reply.
+	onLostUnknown func(up uint64)
+}
+
+func newSession(client bool, cfg streamConfig, seal, open *packetCipher) *session {
+	return &session{
+		cfg: cfg, client: client, seal: seal, open: open,
+		sent: make(map[uint64]*sentPkt), replyOf: make(map[uint64]uint64),
+		streams: make(map[uint64]*stream), done: make(chan struct{}),
+	}
+}
+
+func (s *session) wake() {
+	if s.wakeFn != nil {
+		s.wakeFn()
+	}
+}
+
+// queueCtrl queues a control frame. Caller holds s.mu.
+func (s *session) queueCtrl(c ctrl) {
+	if c.typ == frMaxStream {
+		for i, q := range s.ctrlQ {
+			if q.typ == frMaxStream && q.id == c.id {
+				s.ctrlQ[i].val = max(q.val, c.val)
+				return
+			}
+		}
+	}
+	s.ctrlQ = append(s.ctrlQ, c)
+}
+
+// openStream creates a client stream. Caller holds s.mu.
+func (s *session) openStream() (*stream, error) {
+	if s.closed {
+		return nil, s.closeErr
+	}
+	if len(s.streams) >= s.cfg.MaxStreams {
+		return nil, errors.New("seep: too many streams")
+	}
+	st := newStream(s, s.nextStreamID)
+	s.nextStreamID++
+	st.advertise()
+	s.streams[st.id] = st
+	s.rr = append(s.rr, st.id)
+	return st, nil
+}
+
+// maybeRemove forgets a stream once both directions are finished. Caller holds s.mu.
+func (s *session) maybeRemove(st *stream) {
+	if _, ok := s.streams[st.id]; !ok || !st.doneSending() || !st.doneReceiving() {
+		return
+	}
+	if st.rclosed && !st.rfin && !st.reset {
+		// We stopped reading before the peer finished: tell it to stop sending.
+		s.queueCtrl(ctrl{typ: frReset, id: st.id})
+	}
+	delete(s.streams, st.id)
+	s.closedIDs.add(st.id, st.id+1)
+	if i := slices.Index(s.rr, st.id); i >= 0 {
+		s.rr = slices.Delete(s.rr, i, i+1)
+	}
+}
+
+func (s *session) close(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closeLocked(err)
+}
+
+func (s *session) closeLocked(err error) {
+	if s.closed {
+		return
+	}
+	s.closed, s.closeErr = true, err
+	for _, st := range s.streams {
+		st.abort(err)
+	}
+	close(s.done)
+}
+
+// decodePN expands a truncated 16-bit packet number (RFC 9000 §A.3).
+func decodePN(largest uint64, have bool, trunc uint16) uint64 {
+	expected := uint64(0)
+	if have {
+		expected = largest + 1
+	}
+	const win, hwin, mask = 1 << 16, 1 << 15, 1<<16 - 1
+	cand := expected&^mask | uint64(trunc)
+	switch {
+	case cand+hwin <= expected && cand < 1<<62-win:
+		return cand + win
+	case cand > expected+hwin && cand >= win:
+		return cand - win
+	}
+	return cand
+}
+
+// receive processes an authenticated packet's frames. It reports whether the packet was new.
+// Caller holds s.mu.
+func (s *session) receive(pn uint64, frames []byte, now time.Time) (bool, error) {
+	if s.recvd.contains(pn) || (s.haveRecv && pn+1<<15 < s.largestRecv) {
+		return false, nil
+	}
+	s.recvd.add(pn, pn+1)
+	if !s.haveRecv || pn > s.largestRecv {
+		s.largestRecv, s.haveRecv = pn, true
+	}
+	if s.largestRecv > 1<<14 {
+		s.recvd.trimBelow(s.largestRecv - 1<<14)
+	}
+	if s.client {
+		s.toAck.add(pn, pn+1)
+		if len(s.toAck) > maxAckRanges {
+			s.toAck = s.toAck[len(s.toAck)-maxAckRanges:]
+		}
+	}
+	err := parseFrames(frames, func(f *frame) error {
+		if f.typ != frAck && f.typ != frLost && f.typ != frPing {
+			s.rxData = true
+		}
+		switch {
+		case f.typ == frPing:
+		case f.typ == frAck:
+			s.onAck(f.ranges, now)
+		case f.typ == frLost:
+			for _, up := range f.lost {
+				if down, ok := s.replyOf[up]; ok {
+					delete(s.replyOf, up)
+					s.declareLost(down)
+				} else if s.onLostUnknown != nil {
+					s.onLostUnknown(up)
+				}
+			}
+		case f.typ == frReset:
+			if st := s.streams[f.id]; st != nil {
+				// The peer stopped: abort our sending; keep data it already delivered readable.
+				if st.rfin {
+					st.sbuf, st.spending, st.sacked = nil, nil, nil
+					st.sfin, st.sfinAcked = true, true
+					signal(st.writeCh)
+					signal(st.readCh)
+				} else {
+					st.abort(ErrStreamReset)
+				}
+				s.maybeRemove(st)
+			}
+		case f.typ == frMaxStream:
+			if st := s.peerStream(f.id); st != nil && f.val > st.smax {
+				st.smax = f.val
+			}
+		case f.typ == frClose:
+			s.closeLocked(fmt.Errorf("seep: session closed by peer (code %d)", f.val))
+		case f.typ&0xF8 == frStream:
+			st := s.peerStream(f.id)
+			if st == nil {
+				return nil
+			}
+			if err := st.onData(f.off, f.data, f.fin); err != nil {
+				return err
+			}
+			s.maybeRemove(st)
+		}
+		return nil
+	})
+	return true, err
+}
+
+// peerStream returns stream id, accepting it if the peer is opening it. Caller holds s.mu.
+func (s *session) peerStream(id uint64) *stream {
+	if st := s.streams[id]; st != nil {
+		return st
+	}
+	if s.client || s.closedIDs.contains(id) {
+		return nil
+	}
+	if len(s.streams) >= s.cfg.MaxStreams {
+		s.queueCtrl(ctrl{typ: frReset, id: id})
+		s.closedIDs.add(id, id+1)
+		return nil
+	}
+	st := newStream(s, id)
+	st.advertise()
+	s.streams[id] = st
+	s.rr = append(s.rr, id)
+	if s.acceptFn != nil {
+		s.acceptFn(st)
+	}
+	return st
+}
+
+// onAck handles the client's acknowledgement of downstream packets, then declares lost any packet
+// that three later-sent packets overtook by more than 9/8 of the ack RTT (RFC 9002 §6.1).
+// Caller holds s.mu.
+func (s *session) onAck(rs rangeSet, now time.Time) {
+	var largest uint64
+	newly := false
+	for pn, p := range s.sent {
+		if rs.contains(pn) {
+			if sample := now.Sub(p.at); s.ackRTT == 0 {
+				s.ackRTT = sample
+			} else {
+				s.ackRTT = (7*s.ackRTT + sample) / 8
+			}
+			largest = max(largest, pn)
+			newly = true
+			s.acked(p)
+		}
+	}
+	if !newly {
+		return
+	}
+	for pn, p := range s.sent {
+		if pn+3 <= largest && now.Sub(p.at) > s.ackRTT*9/8 {
+			s.declareLost(pn)
+		}
+	}
+}
+
+// acked applies a delivered packet. Caller holds s.mu.
+func (s *session) acked(p *sentPkt) {
+	delete(s.sent, p.pn)
+	if s.replyOf[p.replyTo] == p.pn {
+		delete(s.replyOf, p.replyTo)
+	}
+	for _, r := range p.streams {
+		if st := s.streams[r.id]; st != nil {
+			st.onAcked(r.lo, r.hi, r.fin)
+		}
+	}
+	for _, a := range p.ack {
+		s.toAck.remove(a.lo, a.hi)
+	}
+}
+
+// declareLost requeues a lost packet's contents. Caller holds s.mu.
+func (s *session) declareLost(pn uint64) {
+	p := s.sent[pn]
+	if p == nil {
+		return
+	}
+	delete(s.sent, pn)
+	if s.replyOf[p.replyTo] == pn {
+		delete(s.replyOf, p.replyTo)
+	}
+	for _, r := range p.streams {
+		if st := s.streams[r.id]; st != nil {
+			st.onLost(r.lo, r.hi, r.fin)
+		}
+	}
+	for _, c := range p.ctrls {
+		if c.typ == frMaxStream {
+			if st := s.streams[c.id]; st == nil || st.rmax != c.val {
+				continue // superseded
+			}
+		}
+		s.queueCtrl(c)
+	}
+	// Ack ranges this packet carried still need conveying, if they're recent.
+	for _, a := range p.ack {
+		if s.recvd.contains(a.lo) {
+			s.toAck.add(a.lo, a.hi)
+		}
+	}
+	s.lostQ = append(s.lostQ, p.lost...)
+}
+
+// requeue makes a just-built packet's stream data pending again so the next packet carries a
+// copy: the tail of a transfer is duplicated rather than waiting out a loss. Caller holds s.mu.
+func (s *session) requeue(p *sentPkt) bool {
+	any := false
+	for _, r := range p.streams {
+		st := s.streams[r.id]
+		if st == nil || st.reset {
+			continue
+		}
+		if r.lo < r.hi {
+			st.spending.add(max(r.lo, st.sbase), r.hi)
+			any = true
+		}
+		if r.fin && !st.sfinAcked {
+			st.sfinSent = false
+			any = true
+		}
+	}
+	return any
+}
+
+// hasData reports whether anything other than acks is waiting to be sent. Caller holds s.mu.
+func (s *session) hasData() bool {
+	if len(s.ctrlQ) > 0 || len(s.lostQ) > 0 {
+		return true
+	}
+	for _, id := range s.rr {
+		if st := s.streams[id]; st != nil && st.wantsSend() {
+			return true
+		}
+	}
+	return false
+}
+
+// pendingBytes estimates the stream bytes waiting to be sent. Caller holds s.mu.
+func (s *session) pendingBytes() int {
+	n := 0
+	for _, st := range s.streams {
+		for _, r := range st.spending {
+			if r.lo < st.smax {
+				n += int(min(r.hi, st.smax) - r.lo)
+			}
+		}
+	}
+	return n
+}
+
+// build fills a packet's frames into b (up to budget bytes) and records it as sent. It always
+// produces at least minPlain bytes. Caller holds s.mu.
+func (s *session) build(b []byte, budget int, now time.Time, replyTo uint64) (pn uint64, out []byte, data bool, pkt *sentPkt) {
+	start := len(b)
+	room := func() int { return budget - (len(b) - start) }
+	p := &sentPkt{pn: s.nextPN, at: now, replyTo: replyTo}
+	s.nextPN++
+
+	// Control frames first: they unblock the peer.
+	for len(s.ctrlQ) > 0 {
+		c := s.ctrlQ[0]
+		enc := c.appendTo(nil)
+		if len(enc) > room() {
+			break
+		}
+		b = append(b, enc...)
+		p.ctrls = append(p.ctrls, c)
+		s.ctrlQ = s.ctrlQ[1:]
+		data = true
+	}
+	if len(s.lostQ) > 0 && room() > 4 {
+		slices.Sort(s.lostQ)
+		s.lostQ = slices.Compact(s.lostQ)
+		slices.Reverse(s.lostQ)
+		n := min(len(s.lostQ), maxLostPerPkt)
+		for n > 0 && len(appendLost(nil, s.lostQ[:n])) > room() {
+			n--
+		}
+		if n > 0 {
+			b = appendLost(b, s.lostQ[:n])
+			p.lost = append(p.lost, s.lostQ[:n]...)
+			s.lostQ = s.lostQ[n:]
+		}
+	}
+	if s.client && len(s.toAck) > 0 {
+		rs := s.toAck
+		for len(rs) > 0 && ackLen(rs) > room() {
+			rs = rs[1:]
+		}
+		if len(rs) > 0 {
+			b = appendAck(b, rs)
+			p.ack = slices.Clone(rs)
+		}
+	}
+	// Stream data, round-robin across streams so one bulk transfer can't starve the rest.
+	for i := 0; i < len(s.rr) && room() > 3; i++ {
+		id := s.rr[0]
+		s.rr = append(s.rr[1:], id)
+		st := s.streams[id]
+		if st == nil || !st.wantsSend() {
+			continue
+		}
+		for st.wantsSend() && room() > 3 {
+			if len(st.spending) == 0 {
+				// A bare FIN.
+				off := st.send()
+				if streamHeaderLen(id, off, 0) > room() {
+					break
+				}
+				b = appendStream(b, id, off, nil, true, false)
+				st.sfinSent = true
+				p.streams = append(p.streams, sentRange{id: id, lo: off, hi: off, fin: true})
+				data = true
+				break
+			}
+			r := st.spending[0]
+			hi := min(r.hi, st.smax)
+			hdr := streamHeaderLen(id, r.lo, int(hi-r.lo))
+			if hdr >= room() {
+				break
+			}
+			hi = min(hi, r.lo+uint64(room()-hdr))
+			fin := st.sfin && !st.sfinAcked && hi == st.send()
+			chunk := st.sbuf[r.lo-st.sbase : hi-st.sbase]
+			b = appendStream(b, id, r.lo, chunk, fin, false)
+			st.spending.remove(r.lo, hi)
+			if fin {
+				st.sfinSent = true
+			}
+			p.streams = append(p.streams, sentRange{id: id, lo: r.lo, hi: hi, fin: fin})
+			data = true
+		}
+	}
+	for len(b)-start < minPlain {
+		b = append(b, frPadding)
+	}
+	if data || len(p.ack) > 0 || len(p.lost) > 0 {
+		s.sent[p.pn] = p
+		if !s.client {
+			s.replyOf[p.replyTo] = p.pn
+		}
+		pkt = p
+	}
+	return p.pn, b, data, pkt
+}
