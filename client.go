@@ -33,7 +33,10 @@ type Config struct {
 	StreamWindow  uint64 // per-stream receive window. Default 256 KiB.
 	SendBuffer    int    // per-stream send buffer. Default 64 KiB.
 	MaxStreams    int    // Default 64.
-	Logger        *slog.Logger
+	// TCP controls TCP/53 paths: "auto" (default) adds one for a resolver whose UDP path never
+	// answers, "on" adds one for every resolver up front, "off" never does.
+	TCP    string
+	Logger *slog.Logger
 }
 
 func (c *Config) setDefaults() {
@@ -66,6 +69,9 @@ func (c *Config) setDefaults() {
 	if c.Logger == nil {
 		c.Logger = slog.New(slog.DiscardHandler)
 	}
+	if c.TCP == "" {
+		c.TCP = "auto"
+	}
 }
 
 const (
@@ -96,6 +102,8 @@ type Client struct {
 
 type path struct {
 	addr      *net.UDPAddr
+	tcp       *tcpLink // nil for UDP
+	sibling   bool     // a TCP path was added for this UDP path
 	srtt      time.Duration
 	rttvar    time.Duration
 	hasRTT    bool
@@ -201,9 +209,35 @@ func (c *Client) addPathLocked(r string) error {
 			return nil
 		}
 	}
-	c.paths = append(c.paths, &path{addr: ua, cwnd: 4, ssthresh: float64(c.cfg.MaxPathWindow),
-		nameLen: c.cfg.SafeQName, limitClass: limitClasses - 1})
+	c.paths = append(c.paths, c.newPath(ua, false))
+	if c.cfg.TCP == "on" {
+		c.paths[len(c.paths)-1].sibling = true
+		c.paths = append(c.paths, c.newPath(ua, true))
+	}
 	return nil
+}
+
+func (c *Client) newPath(ua *net.UDPAddr, tcp bool) *path {
+	p := &path{addr: ua, cwnd: 4, ssthresh: float64(c.cfg.MaxPathWindow),
+		nameLen: c.cfg.SafeQName, limitClass: limitClasses - 1}
+	if tcp {
+		p.tcp = c.startTCP(ua.String())
+	}
+	return p
+}
+
+// addTCPSiblingsLocked gives a TCP path to each resolver whose UDP path has failed repeatedly
+// without ever answering.
+func (c *Client) addTCPSiblingsLocked() {
+	if c.cfg.TCP != "auto" {
+		return
+	}
+	for _, p := range c.paths {
+		if p.tcp == nil && !p.sibling && !p.verified && p.outN >= 2 {
+			p.sibling = true
+			c.paths = append(c.paths, c.newPath(p.addr, true))
+		}
+	}
 }
 
 // Close shuts the client down.
@@ -290,12 +324,17 @@ func (c *Client) run() {
 		now := time.Now()
 		c.mu.Lock()
 		c.expireLocked(now)
+		c.addTCPSiblingsLocked()
 		c.fillLocked(now)
 		if debugOn && now.Sub(c.lastDump) > 250*time.Millisecond {
 			c.lastDump = now
 			line := ""
 			for _, p := range c.paths {
-				line += fmt.Sprintf(" [%s cw=%.1f in=%d rtt=%v loss=%.2f v=%v]", p.addr.IP, p.cwnd, p.inflight, p.srtt.Round(time.Millisecond), p.lossRate(), p.verified)
+				tr := "u"
+				if p.tcp != nil {
+					tr = "t"
+				}
+				line += fmt.Sprintf(" [%s/%s cw=%.1f in=%d rtt=%v loss=%.2f v=%v]", p.addr.IP, tr, p.cwnd, p.inflight, p.srtt.Round(time.Millisecond), p.lossRate(), p.verified)
 			}
 			if c.sess != nil && c.sess.session != nil {
 				c.sess.mu.Lock()
@@ -335,7 +374,9 @@ func (c *Client) nextDeadlineLocked(now time.Time) time.Duration {
 	return max(next.Sub(now), time.Millisecond)
 }
 
-func (p *path) usable(now time.Time) bool { return !p.dead && !p.suspended.After(now) }
+func (p *path) usable(now time.Time) bool {
+	return !p.dead && !p.suspended.After(now) && (p.tcp == nil || p.tcp.up.Load())
+}
 
 // rto is how long a query on p may take before it's presumed lost, excluding any hold.
 func (p *path) rto() time.Duration {
@@ -603,6 +644,10 @@ func (c *Client) sendLocked(p *path, q *pendingQuery, payload []byte, now time.T
 	p.nextSeq++
 	c.pending[q.txn] = q
 	p.inflight++
+	if p.tcp != nil {
+		p.tcp.send(msg)
+		return
+	}
 	if _, err := c.pc.WriteTo(msg, p.addr); err != nil {
 		c.cfg.Logger.Debug("send failed", "resolver", p.addr, "err", err)
 	}

@@ -10,8 +10,11 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -26,17 +29,27 @@ type ServerConfig struct {
 	// LossTimeout declares a downstream packet lost if neither acked nor reported. Default 3s.
 	LossTimeout time.Duration
 	// IdleTimeout ends sessions that send nothing. Default 2m.
-	IdleTimeout  time.Duration
-	StreamWindow uint64
-	SendBuffer   int
-	MaxStreams   int
-	Logger       *slog.Logger
+	IdleTimeout time.Duration
+	// MaxSessions caps concurrent sessions. Default 8192.
+	MaxSessions int
+	// MaxTotalStreams caps open streams across all sessions. Default 16384.
+	MaxTotalStreams int
+	StreamWindow    uint64
+	SendBuffer      int
+	MaxStreams      int
+	Logger          *slog.Logger
 }
 
 func (c *ServerConfig) setDefaults() {
 	if c.Dial == nil {
-		d := &net.Dialer{Timeout: 15 * time.Second}
+		d := &net.Dialer{Timeout: 15 * time.Second, Control: publicOnly}
 		c.Dial = d.DialContext
+	}
+	if c.MaxSessions <= 0 || c.MaxSessions > 1<<15 {
+		c.MaxSessions = 8192
+	}
+	if c.MaxTotalStreams <= 0 {
+		c.MaxTotalStreams = 16384
 	}
 	if c.MaxHold <= 0 {
 		c.MaxHold = 1500 * time.Millisecond
@@ -47,14 +60,15 @@ func (c *ServerConfig) setDefaults() {
 	if c.IdleTimeout <= 0 {
 		c.IdleTimeout = 2 * time.Minute
 	}
+	// Uploads are small; a modest receive window bounds what one session can make us buffer.
 	if c.StreamWindow == 0 {
-		c.StreamWindow = 256 << 10
+		c.StreamWindow = 64 << 10
 	}
 	if c.SendBuffer <= 0 {
 		c.SendBuffer = 256 << 10
 	}
 	if c.MaxStreams <= 0 {
-		c.MaxStreams = 256
+		c.MaxStreams = 128
 	}
 	if c.Logger == nil {
 		c.Logger = slog.New(slog.DiscardHandler)
@@ -71,6 +85,7 @@ type Server struct {
 	mu       sync.Mutex
 	sessions map[uint16]*srvSession
 	hellos   map[[pubLen]byte]*helloEntry
+	streams  atomic.Int64
 }
 
 type helloEntry struct {
@@ -82,6 +97,8 @@ type srvSession struct {
 	*session
 	srv       *Server
 	sid       uint16
+	created   time.Time
+	used      atomic.Bool  // a valid data packet arrived: the hello wasn't just noise
 	held      []*heldQuery // guarded by session.mu
 	lastSeen  time.Time    // guarded by session.mu
 	abandoned rangeSet     // upstream pns the client gave up on; guarded by session.mu
@@ -178,6 +195,10 @@ func (s *Server) hello(q *query, addr net.Addr, eph []byte) {
 		s.reply(q, addr, rcodeOK, h.reply)
 		return
 	}
+	if len(s.sessions) >= s.cfg.MaxSessions && !s.evictUnusedLocked() {
+		s.reply(q, addr, rcodeRefused, nil)
+		return
+	}
 	var sid uint16
 	for sid == 0 || s.sessions[sid] != nil {
 		var b [2]byte
@@ -190,9 +211,19 @@ func (s *Server) hello(q *query, addr net.Addr, eph []byte) {
 		return
 	}
 	cfg := streamConfig{StreamWindow: s.cfg.StreamWindow, SendBuffer: s.cfg.SendBuffer, MaxStreams: s.cfg.MaxStreams}
-	ss := &srvSession{session: newSession(false, cfg, down, up), srv: s, sid: sid, lastSeen: time.Now()}
+	ss := &srvSession{session: newSession(false, cfg, down, up), srv: s, sid: sid, lastSeen: time.Now(), created: time.Now()}
 	ss.wakeFn = ss.flush
-	ss.acceptFn = func(st *stream) { go ss.serveStream(st) }
+	ss.acceptFn = func(st *stream) bool {
+		if st == nil {
+			return s.streams.Load() < int64(s.cfg.MaxTotalStreams)
+		}
+		s.streams.Add(1)
+		go func() {
+			defer s.streams.Add(-1)
+			ss.serveStream(st)
+		}()
+		return true
+	}
 	// The client gave up on a query we haven't answered: don't spend data on it, since an answer
 	// lost now would never be reported.
 	ss.onLostUnknown = func(up uint64) {
@@ -211,6 +242,23 @@ func (s *Server) hello(q *query, addr net.Addr, eph []byte) {
 	s.sessions[sid] = ss
 	s.hellos[key] = &helloEntry{reply: reply, at: time.Now()}
 	s.reply(q, addr, rcodeOK, reply)
+}
+
+// evictUnusedLocked drops the oldest session that never sent a valid data packet, so a flood of
+// hellos can't lock real clients out. Caller holds s.mu.
+func (s *Server) evictUnusedLocked() bool {
+	var victim *srvSession
+	for _, ss := range s.sessions {
+		if !ss.used.Load() && (victim == nil || ss.created.Before(victim.created)) {
+			victim = ss
+		}
+	}
+	if victim == nil {
+		return false
+	}
+	delete(s.sessions, victim.sid)
+	go victim.close(ErrClosed)
+	return true
 }
 
 // onQuery handles a data query: it applies the client's packet, then answers now or holds the
@@ -235,6 +283,7 @@ func (ss *srvSession) onQuery(q *query, addr net.Addr, p []byte) {
 	}
 	dbg("srv q pn=%d plain=%x", pn, plain)
 	ss.lastSeen = now
+	ss.used.Store(true)
 	limitClass, holdClass := int(plain[0]&0x0F), int(plain[0]>>4)
 	ss.rxData = false
 	if _, err := ss.receive(pn, plain[1:], now); err != nil {
@@ -395,6 +444,38 @@ func relay(c *Conn, up net.Conn) {
 	c.Close()
 }
 
+// publicOnly refuses connections to loopback, private, link-local and other non-public
+// addresses: anyone holding the (public) server key can open streams, and the server must not
+// become a way into its own network. It checks the address actually dialed, after resolution.
+func publicOnly(network, address string, _ syscall.RawConn) error {
+	ap, err := netip.ParseAddrPort(address)
+	if err != nil {
+		return err
+	}
+	a := ap.Addr().Unmap()
+	if !a.IsGlobalUnicast() || a.IsPrivate() || isSpecial(a) {
+		return fmt.Errorf("seep: destination %s is not public", a)
+	}
+	return nil
+}
+
+var specialPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("100.64.0.0/10"),  // CGNAT
+	netip.MustParsePrefix("192.0.0.0/24"),   // IETF protocol assignments
+	netip.MustParsePrefix("198.18.0.0/15"),  // benchmarking
+	netip.MustParsePrefix("240.0.0.0/4"),    // reserved
+	netip.MustParsePrefix("64:ff9b:1::/48"), // local-use NAT64
+}
+
+func isSpecial(a netip.Addr) bool {
+	for _, p := range specialPrefixes {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
+}
+
 // readAddr reads a varint length and that many address bytes.
 func readAddr(r io.Reader) (string, error) {
 	var b [1]byte
@@ -445,7 +526,8 @@ func (s *Server) sweep() {
 						ss.declareLost(pn)
 					}
 				}
-				idle := now.Sub(ss.lastSeen) > s.cfg.IdleTimeout || ss.closed
+				idle := now.Sub(ss.lastSeen) > s.cfg.IdleTimeout || ss.closed ||
+					(!ss.used.Load() && now.Sub(ss.created) > 15*time.Second)
 				out := ss.drainLocked(now)
 				ss.mu.Unlock()
 				s.send(out)

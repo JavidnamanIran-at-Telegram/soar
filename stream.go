@@ -33,8 +33,8 @@ type stream struct {
 	// Receive side. rbuf holds contiguous bytes from rread; rooo out-of-order segments by offset.
 	rbuf      []byte
 	rread     uint64
-	rooo      map[uint64][]byte
-	roooBytes int
+	rooo      map[uint64][]byte // disjoint out-of-order pieces, by offset
+	rgot      rangeSet          // the ranges rooo holds
 	rfin      bool
 	rfinOff   uint64
 	rwin      uint64 // window size
@@ -103,33 +103,37 @@ func (st *stream) onData(off uint64, data []byte, fin bool) error {
 		return nil
 	}
 	if off > c {
-		if old, ok := st.rooo[off]; !ok || len(old) < len(data) {
-			if st.rooo == nil {
-				st.rooo = make(map[uint64][]byte)
-			}
-			if st.roooBytes+len(data) > 2*int(st.rwin) {
-				return nil // drop; the peer will retransmit
-			}
-			st.roooBytes += len(data) - len(old)
-			st.rooo[off] = append([]byte(nil), data...)
+		// Keep only what's new, so storage never exceeds the window however the peer slices it.
+		novel := rangeSet{{off, end}}
+		for _, g := range st.rgot {
+			novel.remove(g.lo, g.hi)
+		}
+		if st.rooo == nil && len(novel) > 0 {
+			st.rooo = make(map[uint64][]byte)
+		}
+		for _, n := range novel {
+			st.rooo[n.lo] = append([]byte(nil), data[n.lo-off:n.hi-off]...)
+			st.rgot.add(n.lo, n.hi)
 		}
 		return nil
 	}
 	st.rbuf = append(st.rbuf, data[c-off:]...)
-	for merged := true; merged && len(st.rooo) > 0; {
-		merged = false
-		for o, d := range st.rooo {
-			c = st.rcontig()
-			if o > c {
-				continue
-			}
-			if e := o + uint64(len(d)); e > c {
-				st.rbuf = append(st.rbuf, d[c-o:]...)
-			}
-			st.roooBytes -= len(d)
+	for len(st.rgot) > 0 && st.rgot[0].lo <= st.rcontig() {
+		c = st.rcontig()
+		g := st.rgot[0]
+		for o := g.lo; o < g.hi; {
+			d := st.rooo[o]
 			delete(st.rooo, o)
-			merged = true
+			if e := o + uint64(len(d)); e > c {
+				st.rbuf = append(st.rbuf, d[max(c, o)-o:]...)
+				c = e
+			}
+			o += uint64(len(d))
 		}
+		st.rgot = st.rgot[1:]
+	}
+	if len(st.rgot) > 0 {
+		st.rgot.trimBelow(st.rcontig())
 	}
 	signal(st.readCh)
 	return nil
@@ -192,7 +196,7 @@ func (st *stream) doneReceiving() bool {
 func (st *stream) abort(err error) {
 	st.reset, st.resetErr = true, err
 	st.sbuf, st.spending, st.sacked = nil, nil, nil
-	st.rooo, st.roooBytes = nil, 0
+	st.rooo, st.rgot = nil, nil
 	signal(st.readCh)
 	signal(st.writeCh)
 }
@@ -299,7 +303,7 @@ func (c *Conn) Close() error {
 	st.sfin = true
 	if !st.doneReceiving() {
 		st.rclosed = true
-		st.rbuf, st.rooo, st.roooBytes = nil, nil, 0
+		st.rbuf, st.rooo, st.rgot = nil, nil, nil
 		// Ask the peer to stop sending; our own data is unaffected unless already done.
 		if st.doneSending() || len(st.sbuf) == 0 {
 			s.queueCtrl(ctrl{typ: frReset, id: st.id})

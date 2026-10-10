@@ -16,7 +16,14 @@ import (
 
 const testZone = "t.example.com"
 
+// loopbackDial lets tests reach origins on 127.0.0.1, which the default dialer refuses.
+var loopbackDial = (&net.Dialer{}).DialContext
+
 func startServer(t *testing.T) (string, ed25519.PublicKey) {
+	return startServerWith(t, ServerConfig{Dial: loopbackDial})
+}
+
+func startServerWith(t *testing.T, cfg ServerConfig) (string, ed25519.PublicKey) {
 	t.Helper()
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -25,7 +32,8 @@ func startServer(t *testing.T) (string, ed25519.PublicKey) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go Serve(ctx, pc, ServerConfig{Zone: testZone, PrivateKey: priv})
+	cfg.Zone, cfg.PrivateKey = testZone, priv
+	go Serve(ctx, pc, cfg)
 	return pc.LocalAddr().String(), pub
 }
 
@@ -208,4 +216,33 @@ func TestE2ELossyMultipath(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestDefaultDialRefusesLoopback(t *testing.T) {
+	srv, pub := startServerWith(t, ServerConfig{})
+	origin := startOrigin(t)
+	c, _ := NewClient(Config{Zone: testZone, ServerKey: pub, Resolvers: []string{srv}})
+	defer c.Close()
+	conn, err := c.DialContext(context.Background(), "tcp", origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	fmt.Fprintf(conn, "10\n")
+	if _, err := io.ReadAll(conn); err == nil {
+		t.Fatal("server dialed a loopback destination")
+	}
+}
+
+func TestPublicOnly(t *testing.T) {
+	for addr, ok := range map[string]bool{
+		"127.0.0.1:80": false, "10.1.2.3:443": false, "169.254.169.254:80": false,
+		"100.64.0.1:80": false, "[::1]:443": false, "[fd00::1]:80": false, "0.0.0.0:80": false,
+		"8.8.8.8:443": true, "[2606:4700::1111]:443": true,
+	} {
+		if err := publicOnly("tcp", addr, nil); (err == nil) != ok {
+			t.Errorf("%s: allowed=%v, want %v", addr, err == nil, ok)
+		}
+	}
 }

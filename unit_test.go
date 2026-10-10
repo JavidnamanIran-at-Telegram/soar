@@ -137,3 +137,48 @@ func TestDecodePN(t *testing.T) {
 		t.Fatal("first")
 	}
 }
+
+func TestStreamReassemblyOverlaps(t *testing.T) {
+	s := newSession(false, streamConfig{StreamWindow: 1 << 16, SendBuffer: 1 << 16, MaxStreams: 4}, nil, nil)
+	st := newStream(s, 0)
+	st.rmax = 1 << 16
+	data := pattern(5000)
+	// Overlapping, out-of-order, re-cut pieces, as retransmission over varied paths produces.
+	pieces := [][2]int{{3000, 5000}, {1000, 2500}, {1200, 3200}, {4000, 4500}, {2400, 2600}, {0, 1100}}
+	for _, p := range pieces {
+		if err := st.onData(uint64(p[0]), data[p[0]:p[1]], p[1] == 5000); err != nil {
+			t.Fatal(err)
+		}
+		held := 0
+		for _, d := range st.rooo {
+			held += len(d)
+		}
+		if held > 5000 {
+			t.Fatalf("out-of-order storage %d exceeds the data", held)
+		}
+	}
+	if !bytes.Equal(st.rbuf, data) || len(st.rooo) != 0 || len(st.rgot) != 0 {
+		t.Fatalf("reassembled %d bytes, rooo=%d rgot=%v", len(st.rbuf), len(st.rooo), st.rgot)
+	}
+}
+
+func TestPeerStreamReorderedOpens(t *testing.T) {
+	s := newSession(false, streamConfig{StreamWindow: 1 << 16, SendBuffer: 1 << 16, MaxStreams: 8}, nil, nil)
+	for _, id := range []uint64{0, 3, 1} {
+		if s.peerStream(id) == nil {
+			t.Fatalf("stream %d refused", id)
+		}
+	}
+	st := s.streams[1]
+	st.sfin, st.sfinAcked, st.rfin = true, true, true
+	s.maybeRemove(st)
+	if s.peerStream(1) != nil {
+		t.Fatal("closed stream reopened")
+	}
+	if s.peerStream(2) == nil {
+		t.Fatal("late open of skipped id 2 refused")
+	}
+	if s.peerStream(100) != nil {
+		t.Fatal("id far beyond the window accepted")
+	}
+}

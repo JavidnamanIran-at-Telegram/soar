@@ -71,7 +71,8 @@ type session struct {
 	rxData      bool // the last received packet carried stream or control frames
 
 	streams      map[uint64]*stream
-	closedIDs    rangeSet
+	peerNext     uint64   // server: one past the highest stream id the client has used
+	peerGaps     rangeSet // server: ids below peerNext not yet opened (reordered opens)
 	nextStreamID uint64
 	rr           []uint64 // stream ids in round-robin order
 	ctrlQ        []ctrl
@@ -81,7 +82,7 @@ type session struct {
 	done     chan struct{}
 
 	wakeFn   func()
-	acceptFn func(*stream) // server: a new stream arrived
+	acceptFn func(*stream) bool // server: a new stream arrived; false refuses it
 	// onLostUnknown: the client reported an upstream pn lost that has no recorded reply.
 	onLostUnknown func(up uint64)
 }
@@ -110,8 +111,16 @@ func (s *session) queueCtrl(c ctrl) {
 			}
 		}
 	}
+	if len(s.ctrlQ) >= maxCtrlQueue {
+		return // a peer can't make us queue without bound; lost frames are re-sent anyway
+	}
 	s.ctrlQ = append(s.ctrlQ, c)
 }
+
+const (
+	maxCtrlQueue = 1024
+	replayWindow = 1 << 14
+)
 
 // openStream creates a client stream. Caller holds s.mu.
 func (s *session) openStream() (*stream, error) {
@@ -139,7 +148,6 @@ func (s *session) maybeRemove(st *stream) {
 		s.queueCtrl(ctrl{typ: frReset, id: st.id})
 	}
 	delete(s.streams, st.id)
-	s.closedIDs.add(st.id, st.id+1)
 	if i := slices.Index(s.rr, st.id); i >= 0 {
 		s.rr = slices.Delete(s.rr, i, i+1)
 	}
@@ -182,15 +190,16 @@ func decodePN(largest uint64, have bool, trunc uint16) uint64 {
 // receive processes an authenticated packet's frames. It reports whether the packet was new.
 // Caller holds s.mu.
 func (s *session) receive(pn uint64, frames []byte, now time.Time) (bool, error) {
-	if s.recvd.contains(pn) || (s.haveRecv && pn+1<<15 < s.largestRecv) {
+	// recvd only remembers the last replayWindow pns, so anything older is refused outright.
+	if s.recvd.contains(pn) || (s.haveRecv && pn+replayWindow < s.largestRecv) {
 		return false, nil
 	}
 	s.recvd.add(pn, pn+1)
 	if !s.haveRecv || pn > s.largestRecv {
 		s.largestRecv, s.haveRecv = pn, true
 	}
-	if s.largestRecv > 1<<14 {
-		s.recvd.trimBelow(s.largestRecv - 1<<14)
+	if s.largestRecv > replayWindow {
+		s.recvd.trimBelow(s.largestRecv - replayWindow)
 	}
 	if s.client {
 		s.toAck.add(pn, pn+1)
@@ -254,12 +263,29 @@ func (s *session) peerStream(id uint64) *stream {
 	if st := s.streams[id]; st != nil {
 		return st
 	}
-	if s.client || s.closedIDs.contains(id) {
+	// Clients open ids in order, so a window around the highest seen bounds what we track: an id
+	// below it opens only if it was skipped (its first packet arrived late), else it's closed.
+	if s.client || id >= s.peerNext+uint64(s.cfg.MaxStreams) {
 		return nil
+	}
+	if id < s.peerNext {
+		if !s.peerGaps.contains(id) {
+			return nil
+		}
+		s.peerGaps.remove(id, id+1)
+	} else {
+		s.peerGaps.add(s.peerNext, id)
+		s.peerNext = id + 1
+		if floor := s.peerNext - min(s.peerNext, 2*uint64(s.cfg.MaxStreams)); floor > 0 {
+			s.peerGaps.trimBelow(floor)
+		}
 	}
 	if len(s.streams) >= s.cfg.MaxStreams {
 		s.queueCtrl(ctrl{typ: frReset, id: id})
-		s.closedIDs.add(id, id+1)
+		return nil
+	}
+	if s.acceptFn != nil && !s.acceptFn(nil) {
+		s.queueCtrl(ctrl{typ: frReset, id: id})
 		return nil
 	}
 	st := newStream(s, id)
