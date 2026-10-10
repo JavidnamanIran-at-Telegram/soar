@@ -477,16 +477,18 @@ func TestFragmentedReassemblyIsBounded(t *testing.T) {
 	if err == nil {
 		t.Fatal("unbounded fragmentation accepted")
 	}
-	// Adjacent fragments coalesce into one piece per gap.
+	// Many adjacent one-byte pieces in reverse order: bounded, and cheap per insert.
 	_, st2 := newTestStream(t)
-	for i := uint64(100); i < 200; i++ {
-		st2.onData(i, []byte{byte(i)}, false)
+	st2.rmax = 1 << 20
+	start := time.Now()
+	err = nil
+	for i := uint64(3 * maxPieces); i > 0 && err == nil; i-- {
+		err = st2.onData(i, []byte{1}, false)
 	}
-	if len(st2.rooo) != 1 || len(st2.rgot) != 1 || len(st2.rooo[100]) != 100 {
-		t.Fatalf("adjacent fragments kept as %d pieces over %d gaps", len(st2.rooo), len(st2.rgot))
+	if err == nil {
+		t.Fatal("unbounded piece count accepted")
 	}
-	st2.onData(0, make([]byte, 100), false)
-	if len(st2.rbuf) != 200 {
-		t.Fatalf("reassembled %d bytes, want 200", len(st2.rbuf))
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("fragment flood took %v", d)
 	}
 }
