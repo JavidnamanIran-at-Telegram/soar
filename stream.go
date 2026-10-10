@@ -31,15 +31,15 @@ type stream struct {
 	scap      int // bytes the app may buffer
 
 	// Receive side. rbuf holds contiguous bytes from rread; rooo out-of-order segments by offset.
-	rbuf      []byte
-	rread     uint64
-	rooo      map[uint64][]byte // disjoint out-of-order pieces, by offset
-	rgot      rangeSet          // the ranges rooo holds
-	rfin      bool
-	rfinOff   uint64
-	rwin      uint64 // window size
-	rmax      uint64 // limit we last advertised
-	rclosed   bool   // the app closed its read side; arriving data is discarded
+	rbuf    []byte
+	rread   uint64
+	rooo    map[uint64][]byte // disjoint out-of-order pieces, by offset
+	rgot    rangeSet          // the ranges rooo holds
+	rfin    bool
+	rfinOff uint64
+	rwin    uint64 // window size
+	rmax    uint64 // limit we last advertised
+	rclosed bool   // the app closed its read side; arriving data is discarded
 
 	reset    bool // aborted by either side
 	resetErr error
