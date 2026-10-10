@@ -102,7 +102,11 @@ func parseZone(s string) (zone, error) {
 		w = append(w, byte(len(l)))
 		w = append(w, l...)
 	}
-	return zone{wire: w, text: s}, nil
+	z := zone{wire: w, text: s}
+	if z.maxPayload(maxName) < 2+pubLen {
+		return zone{}, errors.New("soar: zone too long to carry a handshake")
+	}
+	return z, nil
 }
 
 // maxPayload returns how many bytes fit base32-encoded under z in a name of at most nameLen

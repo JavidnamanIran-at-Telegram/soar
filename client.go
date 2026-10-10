@@ -104,6 +104,7 @@ type Client struct {
 	candIdx        int
 	lastCand       time.Time
 	cachedVerified int
+	cacheQ         chan []string // the latest verified set, for storeCache
 
 	lastDump time.Time
 }
@@ -211,6 +212,10 @@ func NewClient(cfg Config) (*Client, error) {
 	}
 	if cfg.Discovery.Enabled {
 		c.cands = cfg.Discovery.candidates()
+		if cfg.Discovery.Cache != nil {
+			c.cacheQ = make(chan []string, 1)
+			go c.storeCache(cfg.Discovery.Cache)
+		}
 	}
 	go c.readLoop()
 	go c.run()
@@ -564,11 +569,14 @@ func (c *Client) fillLocked(now time.Time) {
 		c.sendHellosLocked(cs, now)
 		return
 	}
-	if cs.closed {
+	if cs.isClosed() {
 		return
 	}
 	// Keep one probe on each unverified path, so new and recovering resolvers get vetted.
 	for _, p := range c.paths {
+		if c.liveQueriesLocked() >= c.cfg.MaxInflight {
+			break
+		}
 		if !p.verified && p.inflight == 0 && p.usable(now) {
 			c.sendDataLocked(cs, p, now, false)
 		}
@@ -631,12 +639,23 @@ func (c *Client) newTxnLocked() uint16 {
 	}
 }
 
+// liveQueriesLocked counts queries awaiting an answer (not yet given up on).
+func (c *Client) liveQueriesLocked() int {
+	n := 0
+	for _, q := range c.pending {
+		if !q.expired {
+			n++
+		}
+	}
+	return n
+}
+
 func (c *Client) sendHellosLocked(cs *clientSession, now time.Time) {
 	payload := make([]byte, 2, 2+pubLen)
 	payload = append(payload, cs.eph.PublicKey().Bytes()...)
 	sent := 0
 	for _, p := range c.paths {
-		if sent >= maxHelloPaths {
+		if sent >= maxHelloPaths || c.liveQueriesLocked() >= c.cfg.MaxInflight {
 			break
 		}
 		if !p.usable(now) || p.inflight > 0 || now.Sub(p.lastHello) < helloRetry {

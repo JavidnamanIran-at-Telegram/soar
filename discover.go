@@ -182,6 +182,19 @@ func sampleRanges(specs []string, n int) []string {
 	return out
 }
 
+// storeCache writes verified-resolver snapshots to the cache one at a time, in order, so a
+// cache needn't be safe for concurrent use and an older snapshot never lands last.
+func (c *Client) storeCache(cache ResolverCache) {
+	for {
+		select {
+		case <-c.done:
+			return
+		case good := <-c.cacheQ:
+			cache.Store(good)
+		}
+	}
+}
+
 // discoverLocked adds candidate paths at the configured pace while too few paths are verified,
 // and prunes candidates that failed without ever answering.
 func (c *Client) discoverLocked(now time.Time) {
@@ -208,13 +221,22 @@ func (c *Client) discoverLocked(now time.Time) {
 	c.paths = kept
 	if verified != c.cachedVerified && d.Cache != nil {
 		c.cachedVerified = verified
+		// Cache every verified resolver, whatever transport verified it: a TCP-only resolver is
+		// the usual case where UDP/53 is intercepted, and it gets its TCP path again on load.
+		seen := make(map[string]bool)
 		var good []string
 		for _, p := range c.paths {
-			if p.verified && p.tcp == nil {
-				good = append(good, p.addr.String())
+			if a := p.addr.String(); p.verified && !seen[a] {
+				seen[a] = true
+				good = append(good, a)
 			}
 		}
-		go d.Cache.Store(good)
+		// Keep only the newest snapshot queued; one goroutine stores them in order.
+		select {
+		case <-c.cacheQ:
+		default:
+		}
+		c.cacheQ <- good
 	}
 	if verified >= d.Want || probing >= d.Concurrency || now.Sub(c.lastCand) < d.Pace {
 		return

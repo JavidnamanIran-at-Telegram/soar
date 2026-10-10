@@ -13,6 +13,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -756,4 +758,100 @@ func TestHelloFloodDoesNotStallSessions(t *testing.T) {
 	if d := fetch(t, c, origin, 50<<10); d > 10*time.Second {
 		t.Fatalf("50 KiB took %v during a hello flood", d)
 	}
+}
+
+func TestDefaultDialAllowsOnlyWebPorts(t *testing.T) {
+	cfg := ServerConfig{}
+	cfg.setDefaults()
+	if _, err := cfg.Dial(context.Background(), "tcp", "8.8.8.8:25"); err == nil || !strings.Contains(err.Error(), "port not allowed") {
+		t.Fatalf("port 25: %v", err)
+	}
+}
+
+type orderCache struct {
+	mu     sync.Mutex
+	stores [][]string
+}
+
+func (o *orderCache) Load() []string { return nil }
+func (o *orderCache) Store(r []string) {
+	time.Sleep(5 * time.Millisecond) // a slow cache must still see snapshots in order
+	o.mu.Lock()
+	o.stores = append(o.stores, slices.Clone(r))
+	o.mu.Unlock()
+}
+
+func TestDiscoveryCachesTCPVerifiedResolvers(t *testing.T) {
+	srv, pub := startServer(t)
+	origin := startOrigin(t)
+	// A resolver reachable only over TCP: UDP to it goes nowhere.
+	tcpOnly := tcpOnlyResolver(t, srv)
+	cache := &orderCache{}
+	c, err := NewClient(Config{Zone: testZone, ServerKey: pub, TCP: "on", Discovery: Discovery{
+		Enabled: true, Candidates: []string{tcpOnly}, Cache: cache, noBundled: true,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	fetch(t, c, origin, 2000)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		cache.mu.Lock()
+		n := len(cache.stores)
+		last := []string(nil)
+		if n > 0 {
+			last = cache.stores[n-1]
+		}
+		cache.mu.Unlock()
+		if slices.Contains(last, tcpOnly) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("TCP-verified resolver never cached")
+}
+
+// tcpOnlyResolver accepts RFC 7766 TCP queries and forwards them to server over UDP.
+func tcpOnlyResolver(t *testing.T, server string) string {
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	t.Cleanup(func() { ln.Close() })
+	saddr, _ := net.ResolveUDPAddr("udp", server)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				var wmu sync.Mutex
+				var hdr [2]byte
+				for {
+					if _, err := io.ReadFull(c, hdr[:]); err != nil {
+						return
+					}
+					msg := make([]byte, int(hdr[0])<<8|int(hdr[1]))
+					if _, err := io.ReadFull(c, msg); err != nil {
+						return
+					}
+					go func() {
+						back, _ := net.ListenPacket("udp", "127.0.0.1:0")
+						defer back.Close()
+						back.WriteTo(msg, saddr)
+						back.SetReadDeadline(time.Now().Add(3 * time.Second))
+						rb := make([]byte, 4096)
+						m, _, err := back.ReadFrom(rb)
+						if err != nil {
+							return
+						}
+						wmu.Lock()
+						c.Write(append([]byte{byte(m >> 8), byte(m)}, rb[:m]...))
+						wmu.Unlock()
+					}()
+				}
+			}()
+		}
+	}()
+	return ln.Addr().String()
 }

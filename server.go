@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"os"
 	"runtime"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -35,16 +36,34 @@ type ServerConfig struct {
 	MaxSessions int
 	// MaxTotalStreams caps open streams across all sessions. Default 16384.
 	MaxTotalStreams int
-	StreamWindow    uint64
-	SendBuffer      int
-	MaxStreams      int
-	Logger          *slog.Logger
+	// AllowPorts restricts the default dialer to these destination ports. Default 80 and 443.
+	// It doesn't apply to a custom Dial.
+	AllowPorts []string
+	// MaxBytesPerPrefix caps answer bytes per second sent to one source /24 (IPv4) or /48
+	// (IPv6), bounding how much a spoofed-source flood can reflect at a victim. Default 8 MB/s.
+	MaxBytesPerPrefix int
+	StreamWindow      uint64
+	SendBuffer        int
+	MaxStreams        int
+	Logger            *slog.Logger
 }
 
 func (c *ServerConfig) setDefaults() {
 	if c.Dial == nil {
 		d := &net.Dialer{Timeout: 15 * time.Second, Control: PublicOnly}
-		c.Dial = d.DialContext
+		ports := c.AllowPorts
+		if len(ports) == 0 {
+			ports = []string{"80", "443"}
+		}
+		c.Dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if _, port, err := net.SplitHostPort(addr); err != nil || !slices.Contains(ports, port) {
+				return nil, fmt.Errorf("soar: destination port not allowed: %s", addr)
+			}
+			return d.DialContext(ctx, network, addr)
+		}
+	}
+	if c.MaxBytesPerPrefix <= 0 {
+		c.MaxBytesPerPrefix = 8 << 20
 	}
 	if c.MaxSessions <= 0 || c.MaxSessions > 1<<15 {
 		c.MaxSessions = 8192
@@ -90,6 +109,9 @@ type Server struct {
 
 	signTokens tokenBucket
 	helloQ     chan helloJob
+
+	rrlMu sync.Mutex
+	rrl   map[netip.Prefix]*byteBucket
 }
 
 type helloEntry struct {
@@ -130,6 +152,7 @@ func Serve(ctx context.Context, pc net.PacketConn, cfg ServerConfig) error {
 	}
 	s := &Server{cfg: cfg, z: z, pc: pc, ctx: ctx, signTokens: tokenBucket{rate: 200, tokens: 200, last: time.Now()},
 		helloQ:   make(chan helloJob, 256),
+		rrl:      make(map[netip.Prefix]*byteBucket),
 		sessions: make(map[uint16]*srvSession), hellos: make(map[[pubLen]byte]*helloEntry)}
 	go func() {
 		<-ctx.Done()
@@ -160,7 +183,7 @@ func Serve(ctx context.Context, pc net.PacketConn, cfg ServerConfig) error {
 }
 
 func (s *Server) reply(q *query, addr net.Addr, rcode byte, payload []byte) {
-	s.pc.WriteTo(appendAnswer(make([]byte, 0, 512), q, rcode, payload), addr)
+	s.write(appendAnswer(make([]byte, 0, 512), q, rcode, payload), addr)
 }
 
 func (s *Server) handle(msg []byte, addr net.Addr) {
@@ -314,10 +337,17 @@ func (s *Server) handshake(j helloJob) {
 	// Streams count against MaxTotalStreams for as long as the session holds them (buffered,
 	// unacked data included), not just while their relay runs.
 	ss.acceptFn = func(st *stream) bool {
-		if st == nil {
-			return s.streams.Load() < int64(s.cfg.MaxTotalStreams)
+		if st == nil { // reserve a slot atomically; the stream that follows uses it
+			for {
+				n := s.streams.Load()
+				if n >= int64(s.cfg.MaxTotalStreams) {
+					return false
+				}
+				if s.streams.CompareAndSwap(n, n+1) {
+					return true
+				}
+			}
 		}
-		s.streams.Add(1)
 		st.serving = true // keeps it in the session, and counted, while its dial and relay run
 		go func() {
 			ss.serveStream(st)
@@ -433,8 +463,52 @@ type sendItem struct {
 
 func (s *Server) send(items []sendItem) {
 	for _, it := range items {
-		s.pc.WriteTo(it.msg, it.addr)
+		s.write(it.msg, it.addr)
 	}
+}
+
+// write sends one answer if its destination prefix is within its byte budget. A session's
+// queries can carry a spoofed source, and answers outweigh queries, so this bounds what the
+// server reflects at any one network; a real resolver stays far below it.
+func (s *Server) write(msg []byte, addr net.Addr) {
+	if ua, ok := addr.(*net.UDPAddr); ok {
+		ip := ua.AddrPort().Addr().Unmap()
+		bits := 24
+		if ip.Is6() {
+			bits = 48
+		}
+		key, _ := ip.Prefix(bits)
+		now := time.Now()
+		s.rrlMu.Lock()
+		b := s.rrl[key]
+		if b == nil {
+			rate := float64(s.cfg.MaxBytesPerPrefix)
+			b = &byteBucket{rate: rate, burst: rate / 4, tokens: rate / 4, last: now}
+			s.rrl[key] = b
+		}
+		ok := b.take(now, len(msg))
+		s.rrlMu.Unlock()
+		if !ok {
+			return
+		}
+	}
+	s.pc.WriteTo(msg, addr)
+}
+
+// byteBucket is a byte-rate limiter. Caller serializes access.
+type byteBucket struct {
+	rate, burst, tokens float64
+	last                time.Time
+}
+
+func (b *byteBucket) take(now time.Time, n int) bool {
+	b.tokens = min(b.burst, b.tokens+now.Sub(b.last).Seconds()*b.rate)
+	b.last = now
+	if b.tokens < float64(n) {
+		return false
+	}
+	b.tokens -= float64(n)
+	return true
 }
 
 // answerLocked builds the answer to hq and removes it from the held list. Caller holds ss.mu.
@@ -606,6 +680,9 @@ func relay(c *Conn, up net.Conn) {
 	c.Close()
 }
 
+// PublicOnly knows the well-known NAT64 prefix (64:ff9b::/96) but not a network-specific Pref64
+// (RFC 6052): on a host behind NAT64 with its own prefix, wrap it with a check for that prefix.
+//
 // PublicOnly is a net.Dialer Control function that refuses non-public destinations: loopback,
 // private, link-local, CGNAT, reserved, and IPv6 forms that embed one (NAT64, 6to4, Teredo,
 // IPv4-compatible). Anyone holding the (public) server key can open streams, so the server must
@@ -750,6 +827,13 @@ func (s *Server) sweep() {
 					delete(s.hellos, k)
 				}
 			}
+			s.rrlMu.Lock()
+			for k, b := range s.rrl {
+				if now.Sub(b.last) > 30*time.Second {
+					delete(s.rrl, k)
+				}
+			}
+			s.rrlMu.Unlock()
 			sessions := make([]*srvSession, 0, len(s.sessions))
 			for _, ss := range s.sessions {
 				sessions = append(sessions, ss)
@@ -771,7 +855,11 @@ func (s *Server) sweep() {
 				if idle {
 					ss.close(ErrClosed)
 					s.mu.Lock()
-					delete(s.sessions, ss.sid)
+					// The sid may have been evicted and reused meanwhile: only remove this session.
+					if s.sessions[ss.sid] == ss {
+						delete(s.sessions, ss.sid)
+						s.forgetHelloLocked(ss.sid)
+					}
 					s.mu.Unlock()
 				}
 			}

@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -426,5 +427,41 @@ func TestConcurrentReadersAllSeeDataAndEOF(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatal("a concurrent reader stayed blocked with data available")
 		}
+	}
+}
+
+func TestFinalSizeIsEnforced(t *testing.T) {
+	_, st := newTestStream(t)
+	if err := st.onData(0, make([]byte, 10), true); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.onData(10, make([]byte, 5), false); err == nil {
+		t.Fatal("data beyond the final size accepted")
+	}
+	_, st2 := newTestStream(t)
+	st2.onData(20, make([]byte, 10), false)
+	if err := st2.onData(0, make([]byte, 5), true); err == nil {
+		t.Fatal("FIN below data already received accepted")
+	}
+}
+
+func TestZoneTooLongForHandshake(t *testing.T) {
+	long := strings.Repeat("a", 60) + "." + strings.Repeat("b", 60) + "." + strings.Repeat("c", 60) + ".abcdefghij.example.com"
+	if _, err := parseZone(long); err == nil {
+		t.Fatal("zone with no room for a hello accepted")
+	}
+	if _, err := parseZone("t.example.com"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestByteBucket(t *testing.T) {
+	now := time.Now()
+	b := &byteBucket{rate: 1000, burst: 1000, tokens: 1000, last: now}
+	if !b.take(now, 800) || b.take(now, 800) {
+		t.Fatal("burst not enforced")
+	}
+	if !b.take(now.Add(time.Second), 800) {
+		t.Fatal("bucket did not refill")
 	}
 }

@@ -47,6 +47,9 @@ func main() {
 		log.Fatal(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		log.Fatalf("%s: %s", url, resp.Status) // never overwrite a list with an error page
+	}
 
 	var prefixes []netip.Prefix
 	sc := bufio.NewScanner(resp.Body)

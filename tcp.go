@@ -75,6 +75,9 @@ func (l *tcpLink) serve(c *Client, conn net.Conn) {
 		var hdr [2]byte
 		buf := make([]byte, 65535)
 		for {
+			// A black-holed connection accepts writes for a long time; an idle read deadline
+			// closes it so the link redials (resolvers drop idle TCP/53 anyway, RFC 7766).
+			conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 			if _, err := io.ReadFull(conn, hdr[:]); err != nil {
 				return
 			}

@@ -38,6 +38,7 @@ type stream struct {
 	rgot    rangeSet          // the ranges rooo holds
 	rfin    bool
 	rfinOff uint64
+	rhigh   uint64 // highest offset received
 	rwin    uint64 // window size
 	rmax    uint64 // limit we last advertised
 	rclosed bool   // the app closed its read side; arriving data is discarded
@@ -90,12 +91,18 @@ func (st *stream) onData(off uint64, data []byte, fin bool) error {
 	if end > st.rmax {
 		return errors.New("soar: peer exceeded stream flow control")
 	}
+	// A FIN fixes the final size: nothing may arrive beyond it, and it can't fall below data
+	// already received (either way Read would never reach EOF).
+	if st.rfin && end > st.rfinOff {
+		return errors.New("soar: stream data beyond its final size")
+	}
 	if fin {
-		if st.rfin && st.rfinOff != end {
+		if st.rfin && st.rfinOff != end || end < st.rhigh {
 			return errors.New("soar: inconsistent stream FIN")
 		}
 		st.rfin, st.rfinOff = true, end
 	}
+	st.rhigh = max(st.rhigh, end)
 	if st.rclosed || st.reset {
 		signal(st.readCh)
 		return nil
