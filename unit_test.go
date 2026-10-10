@@ -5,6 +5,8 @@ import (
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
+	"os"
 	"testing"
 	"time"
 )
@@ -301,5 +303,66 @@ func TestReplayedAnswerFailsForAnotherQuery(t *testing.T) {
 	}
 	if _, err := c.open(downAD(trunc, 11), sealed, 5); err == nil {
 		t.Fatal("answer to query 10 authenticated as an answer to query 11")
+	}
+}
+
+func TestDeadlines(t *testing.T) {
+	_, st := newTestStream(t)
+	c := &Conn{st: st}
+	errs := make(chan error, 2)
+	for range 2 {
+		go func() {
+			_, err := c.Read(make([]byte, 10))
+			errs <- err
+		}()
+	}
+	time.Sleep(50 * time.Millisecond)
+	c.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+	for range 2 {
+		select {
+		case err := <-errs:
+			if !errors.Is(err, os.ErrDeadlineExceeded) {
+				t.Fatalf("got %v, want deadline exceeded", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("a blocked Read ignored the new deadline")
+		}
+	}
+	// With data buffered and space to write, an expired deadline still fails the call.
+	st.rbuf = []byte("data")
+	if _, err := c.Read(make([]byte, 10)); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("Read after deadline: %v", err)
+	}
+	c.SetWriteDeadline(time.Now().Add(-time.Second))
+	if _, err := c.Write([]byte("x")); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("Write after deadline: %v", err)
+	}
+	c.SetDeadline(time.Time{})
+	if n, err := c.Read(make([]byte, 10)); err != nil || n != 4 {
+		t.Fatalf("Read after clearing deadline: %d, %v", n, err)
+	}
+}
+
+func TestServerStreamCountFollowsSession(t *testing.T) {
+	s := newSession(false, streamConfig{StreamWindow: 1 << 16, SendBuffer: 1 << 16, MaxStreams: 8}, nil, nil)
+	open := 0
+	s.acceptFn = func(st *stream) bool {
+		if st != nil {
+			open++
+		}
+		return true
+	}
+	s.streamGone = func() { open-- }
+	st := s.peerStream(0)
+	s.peerStream(1)
+	st.sbuf = []byte("unacked response")
+	st.sfin, st.rfin = true, true
+	s.maybeRemove(st)
+	if open != 2 {
+		t.Fatalf("open = %d with unacked data still buffered, want 2", open)
+	}
+	s.close(ErrClosed)
+	if open != 0 {
+		t.Fatalf("open = %d after session close, want 0", open)
 	}
 }

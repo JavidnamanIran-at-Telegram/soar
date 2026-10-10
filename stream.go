@@ -232,6 +232,9 @@ type Conn struct {
 func (c *Conn) Read(p []byte) (int, error) {
 	st, s := c.st, c.st.s
 	for {
+		if st.rdl.expired() {
+			return 0, os.ErrDeadlineExceeded
+		}
 		s.mu.Lock()
 		if len(st.rbuf) > 0 {
 			n := copy(p, st.rbuf)
@@ -279,6 +282,9 @@ func (c *Conn) Write(p []byte) (int, error) {
 	st, s := c.st, c.st.s
 	written := 0
 	for written < len(p) {
+		if st.wdl.expired() {
+			return written, os.ErrDeadlineExceeded
+		}
 		s.mu.Lock()
 		if st.reset {
 			err := st.resetErr
@@ -344,33 +350,41 @@ func (c *Conn) RemoteAddr() net.Addr { return c.remote }
 func (c *Conn) SetDeadline(t time.Time) error {
 	c.st.rdl.set(t)
 	c.st.wdl.set(t)
-	signal(c.st.readCh)
-	signal(c.st.writeCh)
 	return nil
 }
 
 func (c *Conn) SetReadDeadline(t time.Time) error {
 	c.st.rdl.set(t)
-	signal(c.st.readCh)
 	return nil
 }
 
 func (c *Conn) SetWriteDeadline(t time.Time) error {
 	c.st.wdl.set(t)
-	signal(c.st.writeCh)
 	return nil
 }
 
-// deadline is a settable deadline for blocking waits.
+// deadline is a settable deadline for blocking waits. Changing it wakes every waiter (by closing
+// changed), so each re-reads the new value.
 type deadline struct {
-	mu sync.Mutex
-	t  time.Time
+	mu      sync.Mutex
+	t       time.Time
+	changed chan struct{}
 }
 
 func (d *deadline) set(t time.Time) {
 	d.mu.Lock()
 	d.t = t
+	if d.changed != nil {
+		close(d.changed)
+	}
+	d.changed = make(chan struct{})
 	d.mu.Unlock()
+}
+
+func (d *deadline) expired() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return !d.t.IsZero() && !time.Now().Before(d.t)
 }
 
 // wait blocks until ch is signaled, the deadline passes, or done closes. When dead closes it
@@ -378,6 +392,10 @@ func (d *deadline) set(t time.Time) {
 func (d *deadline) wait(ch, done, dead <-chan struct{}) error {
 	d.mu.Lock()
 	t := d.t
+	if d.changed == nil {
+		d.changed = make(chan struct{})
+	}
+	changed := d.changed
 	d.mu.Unlock()
 	var timeout <-chan time.Time
 	if !t.IsZero() {
@@ -393,6 +411,8 @@ func (d *deadline) wait(ch, done, dead <-chan struct{}) error {
 	case <-ch:
 		return nil
 	case <-dead:
+		return nil
+	case <-changed:
 		return nil
 	case <-done:
 		return ErrClosed

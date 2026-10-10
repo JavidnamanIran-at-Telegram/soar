@@ -83,6 +83,8 @@ type session struct {
 
 	wakeFn   func()
 	acceptFn func(*stream) bool // server: a new stream arrived; false refuses it
+	// streamGone: a stream the peer opened left the session.
+	streamGone func()
 	// onLostUnknown: the client reported an upstream pn lost that has no recorded reply.
 	onLostUnknown func(up uint64)
 }
@@ -148,6 +150,9 @@ func (s *session) maybeRemove(st *stream) {
 		s.queueCtrl(ctrl{typ: frReset, id: st.id})
 	}
 	delete(s.streams, st.id)
+	if !s.client && s.streamGone != nil {
+		s.streamGone()
+	}
 	if i := slices.Index(s.rr, st.id); i >= 0 {
 		s.rr = slices.Delete(s.rr, i, i+1)
 	}
@@ -164,8 +169,12 @@ func (s *session) closeLocked(err error) {
 		return
 	}
 	s.closed, s.closeErr = true, err
-	for _, st := range s.streams {
+	for id, st := range s.streams {
 		st.abort(err)
+		delete(s.streams, id)
+		if !s.client && s.streamGone != nil {
+			s.streamGone()
+		}
 	}
 	close(s.done)
 }

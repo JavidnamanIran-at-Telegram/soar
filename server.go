@@ -251,17 +251,17 @@ func (s *Server) hello(q *query, addr net.Addr, eph []byte) {
 	cfg := streamConfig{StreamWindow: s.cfg.StreamWindow, SendBuffer: s.cfg.SendBuffer, MaxStreams: s.cfg.MaxStreams}
 	ss := &srvSession{session: newSession(false, cfg, down, up), srv: s, sid: sid, lastSeen: time.Now(), created: time.Now()}
 	ss.wakeFn = ss.flush
+	// Streams count against MaxTotalStreams for as long as the session holds them (buffered,
+	// unacked data included), not just while their relay runs.
 	ss.acceptFn = func(st *stream) bool {
 		if st == nil {
 			return s.streams.Load() < int64(s.cfg.MaxTotalStreams)
 		}
 		s.streams.Add(1)
-		go func() {
-			defer s.streams.Add(-1)
-			ss.serveStream(st)
-		}()
+		go ss.serveStream(st)
 		return true
 	}
+	ss.streamGone = func() { s.streams.Add(-1) }
 	// The client gave up on a query we haven't answered: don't spend data on it, since an answer
 	// lost now would never be reported.
 	ss.onLostUnknown = func(up uint64) {
