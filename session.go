@@ -142,7 +142,7 @@ func (s *session) openStream() (*stream, error) {
 
 // maybeRemove forgets a stream once both directions are finished. Caller holds s.mu.
 func (s *session) maybeRemove(st *stream) {
-	if _, ok := s.streams[st.id]; !ok || !st.doneSending() || !st.doneReceiving() {
+	if _, ok := s.streams[st.id]; !ok || st.serving || !st.doneSending() || !st.doneReceiving() {
 		return
 	}
 	if st.rclosed && !st.rfin && !st.reset {

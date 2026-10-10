@@ -48,6 +48,8 @@ type stream struct {
 	readCh, writeCh chan struct{}
 	dead            chan struct{} // closed when the stream is closed locally or aborted
 	deadClosed      bool
+	aborted         chan struct{} // closed only on a true abort (reset in both directions)
+	serving         bool          // server: serveStream still owns it; it stays counted until done
 	rdl, wdl        deadline
 }
 
@@ -56,7 +58,7 @@ func newStream(s *session, id uint64) *stream {
 		id: id, s: s,
 		smax: initialWindow, scap: s.cfg.SendBuffer,
 		rwin: s.cfg.StreamWindow, rmax: initialWindow,
-		readCh: make(chan struct{}, 1), writeCh: make(chan struct{}, 1), dead: make(chan struct{}),
+		readCh: make(chan struct{}, 1), writeCh: make(chan struct{}, 1), dead: make(chan struct{}), aborted: make(chan struct{}),
 	}
 }
 
@@ -206,6 +208,9 @@ func (st *stream) doneReceiving() bool {
 }
 
 func (st *stream) abort(err error) {
+	if !st.reset {
+		close(st.aborted)
+	}
 	st.reset, st.resetErr = true, err
 	st.sbuf, st.spending, st.sacked = nil, nil, nil
 	st.rooo, st.rgot = nil, nil

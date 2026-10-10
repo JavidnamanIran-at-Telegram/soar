@@ -129,14 +129,16 @@ func Serve(ctx context.Context, pc net.PacketConn, cfg ServerConfig) error {
 		return err
 	}
 	s := &Server{cfg: cfg, z: z, pc: pc, ctx: ctx, signTokens: tokenBucket{rate: 200, tokens: 200, last: time.Now()},
-		helloQ:   make(chan helloJob, 1024),
+		helloQ:   make(chan helloJob, 256),
 		sessions: make(map[uint16]*srvSession), hellos: make(map[[pubLen]byte]*helloEntry)}
 	go func() {
 		<-ctx.Done()
 		pc.Close()
 	}()
 	go s.sweep()
-	for range max(2, runtime.GOMAXPROCS(0)) {
+	// Handshake workers get at most half the cores, so a hello flood can't take the CPU that
+	// established sessions' relays need; past that, the bounded queue sheds new hellos.
+	for range max(1, runtime.GOMAXPROCS(0)/2) {
 		go s.helloWorker()
 	}
 	buf := make([]byte, 4096)
@@ -316,7 +318,14 @@ func (s *Server) handshake(j helloJob) {
 			return s.streams.Load() < int64(s.cfg.MaxTotalStreams)
 		}
 		s.streams.Add(1)
-		go ss.serveStream(st)
+		st.serving = true // keeps it in the session, and counted, while its dial and relay run
+		go func() {
+			ss.serveStream(st)
+			ss.mu.Lock()
+			st.serving = false
+			ss.maybeRemove(st)
+			ss.mu.Unlock()
+		}()
 		return true
 	}
 	ss.streamGone = func() { s.streams.Add(-1) }
@@ -519,10 +528,11 @@ func (ss *srvSession) serveStream(st *stream) {
 		c.Close()
 		return
 	}
-	// The dial dies with the stream: a reset (even one in the same packet as the destination)
-	// releases the stream's quota, so its dial must not outlive it.
+	// A stream the client aborted is never dialed, and an abort cancels a pending dial. A RESET
+	// after the client's FIN is not an abort: it means "I won't read the reply", so the upload is
+	// still delivered. Either way the stream stays counted until serveStream returns.
 	ss.mu.Lock()
-	gone := st.reset || st.rclosed || st.saborted
+	gone := st.reset || st.rclosed
 	ss.mu.Unlock()
 	if gone {
 		c.Close()
@@ -531,7 +541,7 @@ func (ss *srvSession) serveStream(st *stream) {
 	ctx, cancel := context.WithTimeout(ss.srv.ctx, 30*time.Second)
 	go func() {
 		select {
-		case <-st.dead:
+		case <-st.aborted:
 			cancel()
 		case <-ctx.Done():
 		}
@@ -556,19 +566,27 @@ func (ss *srvSession) serveStream(st *stream) {
 // any error (a reset stream, a closed session, a failed destination) closes the destination so
 // the opposite copy can't stay blocked on it.
 func relay(c *Conn, up net.Conn) {
-	// Close the destination as soon as the stream dies or the session ends: after a client FIN
-	// the upload copy is finished and nothing else would unblock a download copy reading it.
+	// Close the destination when the stream is aborted or the session ends, or, once the client
+	// stops reading (the stream dies without an abort), as soon as the upload has been delivered:
+	// after a client FIN nothing else would unblock a download copy reading the destination.
 	finished := make(chan struct{})
 	defer close(finished)
+	done := make(chan struct{})
 	go func() {
 		select {
-		case <-c.st.dead:
+		case <-c.st.aborted:
 		case <-c.st.s.done:
 		case <-finished:
+		case <-c.st.dead:
+			select {
+			case <-done:
+			case <-c.st.aborted:
+			case <-c.st.s.done:
+			case <-finished:
+			}
 		}
 		up.Close()
 	}()
-	done := make(chan struct{})
 	go func() {
 		if _, err := io.Copy(up, c); err != nil {
 			up.Close()

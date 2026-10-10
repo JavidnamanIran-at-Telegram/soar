@@ -484,13 +484,19 @@ func TestResetStreamIsNeverDialed(t *testing.T) {
 	}
 }
 
-func TestResetAfterFinIsNeverDialed(t *testing.T) {
+func TestResetAfterFinStillDialsAndStaysCounted(t *testing.T) {
 	var dials atomic.Int32
 	srv := &Server{ctx: context.Background(), cfg: ServerConfig{Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
 		dials.Add(1)
 		return nil, errors.New("unreachable")
 	}, Logger: slog.New(slog.DiscardHandler)}}
 	ss := &srvSession{session: newSession(false, streamConfig{StreamWindow: 1 << 16, SendBuffer: 1 << 16, MaxStreams: 4}, nil, nil), srv: srv}
+	ss.acceptFn = func(st *stream) bool {
+		if st != nil {
+			st.serving = true
+		}
+		return true
+	}
 	dest := "example.com:443"
 	var pkt []byte
 	pkt = appendStream(pkt, 0, 0, append([]byte{byte(len(dest))}, dest...), true, false)
@@ -502,11 +508,44 @@ func TestResetAfterFinIsNeverDialed(t *testing.T) {
 	st := ss.streams[0]
 	ss.mu.Unlock()
 	if st == nil {
-		t.Skip("stream already removed")
+		t.Fatal("stream released while serveStream still owns it")
 	}
 	ss.serveStream(st)
-	if n := dials.Load(); n != 0 {
-		t.Fatalf("dialed a stream reset after FIN %d times", n)
+	if n := dials.Load(); n != 1 {
+		t.Fatalf("FIN then RESET (client closed after writing): %d dials, want 1", n)
+	}
+}
+
+func TestWriteThenCloseDeliversRequest(t *testing.T) {
+	srv, pub := startServer(t)
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	defer ln.Close()
+	got := make(chan []byte, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		b, _ := io.ReadAll(c)
+		got <- b
+	}()
+	c, _ := NewClient(Config{Zone: testZone, ServerKey: pub, Resolvers: []string{srv}})
+	defer c.Close()
+	conn, err := c.DialContext(context.Background(), "tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := []byte("fire and forget\n")
+	conn.Write(req)
+	conn.Close() // Close promises written data is still delivered
+	select {
+	case b := <-got:
+		if !bytes.Equal(b, req) {
+			t.Fatalf("destination got %q, want %q", b, req)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("request written before Close never reached the destination")
 	}
 }
 
