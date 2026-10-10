@@ -86,6 +86,8 @@ type Server struct {
 	sessions map[uint16]*srvSession
 	hellos   map[[pubLen]byte]*helloEntry
 	streams  atomic.Int64
+
+	signTokens tokenBucket
 }
 
 type helloEntry struct {
@@ -124,7 +126,7 @@ func Serve(ctx context.Context, pc net.PacketConn, cfg ServerConfig) error {
 	if err != nil {
 		return err
 	}
-	s := &Server{cfg: cfg, z: z, pc: pc, ctx: ctx,
+	s := &Server{cfg: cfg, z: z, pc: pc, ctx: ctx, signTokens: tokenBucket{rate: 200, tokens: 200, last: time.Now()},
 		sessions: make(map[uint16]*srvSession), hellos: make(map[[pubLen]byte]*helloEntry)}
 	go func() {
 		<-ctx.Done()
@@ -175,11 +177,46 @@ func (s *Server) handle(msg []byte, addr net.Addr) {
 	s.mu.Lock()
 	ss := s.sessions[sid]
 	s.mu.Unlock()
-	if ss == nil || len(p) < 4+minPlain+tagLen {
+	if ss == nil {
+		s.replyUnknown(q, addr)
+		return
+	}
+	if len(p) < 4+minPlain+tagLen {
 		s.reply(q, addr, rcodeNXDomain, nil)
 		return
 	}
 	ss.onQuery(q, addr, p)
+}
+
+// replyUnknown tells the client its session is gone, signed over the question so an injector
+// can't forge it. Signing is rate-limited, so random session ids can't make us burn CPU; past the
+// limit the reply goes unsigned and the client ignores it.
+func (s *Server) replyUnknown(q *query, addr net.Addr) {
+	if !s.signTokens.take(time.Now()) {
+		s.reply(q, addr, rcodeNXDomain, nil)
+		return
+	}
+	s.reply(q, addr, rcodeNXDomain, ed25519.Sign(s.cfg.PrivateKey, unknownSessionMsg(q.question)))
+}
+
+// tokenBucket is a mutex-guarded rate limiter: rate per second, burst of rate.
+type tokenBucket struct {
+	mu     sync.Mutex
+	rate   float64
+	tokens float64
+	last   time.Time
+}
+
+func (b *tokenBucket) take(now time.Time) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.tokens = min(b.rate, b.tokens+now.Sub(b.last).Seconds()*b.rate)
+	b.last = now
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
 }
 
 func (s *Server) hello(q *query, addr net.Addr, eph []byte) {
@@ -441,17 +478,25 @@ func (ss *srvSession) serveStream(st *stream) {
 }
 
 // relay copies both ways and closes both ends when done.
+// relay copies both ways and closes both ends when done. A clean EOF half-closes the other side;
+// any error (a reset stream, a closed session, a failed destination) closes the destination so
+// the opposite copy can't stay blocked on it.
 func relay(c *Conn, up net.Conn) {
 	done := make(chan struct{})
 	go func() {
-		io.Copy(up, c)
-		if cw, ok := up.(interface{ CloseWrite() error }); ok {
+		if _, err := io.Copy(up, c); err != nil {
+			up.Close()
+		} else if cw, ok := up.(interface{ CloseWrite() error }); ok {
 			cw.CloseWrite()
 		}
 		close(done)
 	}()
-	io.Copy(c, up)
-	c.CloseWrite()
+	if _, err := io.Copy(c, up); err != nil {
+		up.Close()
+		c.Close()
+	} else {
+		c.CloseWrite()
+	}
 	<-done
 	up.Close()
 	c.Close()

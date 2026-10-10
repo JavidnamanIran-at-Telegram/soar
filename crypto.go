@@ -1,6 +1,7 @@
 package soar
 
 import (
+	"bytes"
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/hkdf"
@@ -24,7 +25,9 @@ const (
 	helloReplyLen = pubLen + 2 + sigLen
 
 	sigContext = "soar v1 hello"
-	kdfLabel   = "soar v1 "
+	// unknownContext domain-separates the server's signed "no such session" reply.
+	unknownContext = "soar v1 unknown session"
+	kdfLabel       = "soar v1 "
 )
 
 var (
@@ -130,6 +133,12 @@ func sessionCiphers(ee, transcript []byte) (up, down *packetCipher, err error) {
 	}
 	down, err = newCipher(prk, "down")
 	return up, down, err
+}
+
+// unknownSessionMsg is what the server signs to say a query's session doesn't exist: the
+// question, lower-cased since resolvers may randomize case on the way to us.
+func unknownSessionMsg(question []byte) []byte {
+	return append([]byte(unknownContext), bytes.ToLower(question)...)
 }
 
 func transcript(clientEph, serverEph []byte, sid uint16) []byte {

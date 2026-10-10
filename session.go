@@ -229,7 +229,7 @@ func (s *session) receive(pn uint64, frames []byte, now time.Time) (bool, error)
 				// The peer stopped: abort our sending; keep data it already delivered readable.
 				if st.rfin {
 					st.sbuf, st.spending, st.sacked = nil, nil, nil
-					st.sfin, st.sfinAcked = true, true
+					st.sfin, st.saborted = true, true
 					signal(st.writeCh)
 					signal(st.readCh)
 				} else {

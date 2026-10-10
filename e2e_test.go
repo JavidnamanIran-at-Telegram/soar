@@ -288,3 +288,85 @@ func TestRoundTripper(t *testing.T) {
 		t.Fatalf("body %d bytes", len(body))
 	}
 }
+
+// nxInjector forwards to server but first answers every query with an unsigned NXDOMAIN.
+func nxInjector(t *testing.T, server string) string {
+	front, _ := net.ListenPacket("udp", "127.0.0.1:0")
+	t.Cleanup(func() { front.Close() })
+	saddr, _ := net.ResolveUDPAddr("udp", server)
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, from, err := front.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			msg := append([]byte(nil), buf[:n]...)
+			if q, err := parseQuery(msg, zone{}); err == nil {
+				front.WriteTo(appendAnswer(nil, q, rcodeNXDomain, nil), from)
+			}
+			go func() {
+				back, _ := net.ListenPacket("udp", "127.0.0.1:0")
+				defer back.Close()
+				back.WriteTo(msg, saddr)
+				back.SetReadDeadline(time.Now().Add(3 * time.Second))
+				rb := make([]byte, 4096)
+				if m, _, err := back.ReadFrom(rb); err == nil {
+					front.WriteTo(rb[:m], from)
+				}
+			}()
+		}
+	}()
+	return front.LocalAddr().String()
+}
+
+func TestForgedNXDomainIgnored(t *testing.T) {
+	srv, pub := startServer(t)
+	origin := startOrigin(t)
+	c, _ := NewClient(Config{Zone: testZone, ServerKey: pub, Resolvers: []string{nxInjector(t, srv)}})
+	defer c.Close()
+	for range 3 {
+		fetch(t, c, origin, 20<<10)
+	}
+}
+
+func TestServerRestartSignedUnknownSession(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pc, _ := net.ListenPacket("udp", "127.0.0.1:0")
+	addr := pc.LocalAddr().String()
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	go Serve(ctx1, pc, ServerConfig{Zone: testZone, PrivateKey: priv, Dial: loopbackDial})
+	origin := startOrigin(t)
+	c, _ := NewClient(Config{Zone: testZone, ServerKey: pub, Resolvers: []string{addr}})
+	defer c.Close()
+	fetch(t, c, origin, 10<<10)
+
+	cancel1() // the server restarts and forgets every session
+	time.Sleep(100 * time.Millisecond)
+	pc2, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	t.Cleanup(cancel2)
+	go Serve(ctx2, pc2, ServerConfig{Zone: testZone, PrivateKey: priv, Dial: loopbackDial})
+
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		conn, err := c.DialContext(ctx, "tcp", origin)
+		cancel()
+		if err == nil {
+			conn.SetDeadline(time.Now().Add(3 * time.Second))
+			fmt.Fprintf(conn, "%d\n", 100)
+			got, err := io.ReadAll(conn)
+			conn.Close()
+			if err == nil && bytes.Equal(got, pattern(100)) {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("client never recovered from the server restart")
+		}
+	}
+}

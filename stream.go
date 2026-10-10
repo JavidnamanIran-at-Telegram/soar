@@ -28,7 +28,8 @@ type stream struct {
 	sfin      bool     // the app closed its write side
 	sfinSent  bool     // a FIN is in flight (pending acks or loss)
 	sfinAcked bool
-	scap      int // bytes the app may buffer
+	saborted  bool // the peer reset our sending; acks and losses for old ranges are moot
+	scap      int  // bytes the app may buffer
 
 	// Receive side. rbuf holds contiguous bytes from rread; rooo out-of-order segments by offset.
 	rbuf    []byte
@@ -144,6 +145,9 @@ func (st *stream) onData(off uint64, data []byte, fin bool) error {
 
 // onAcked records that the peer received [lo, hi) and maybe the FIN. Caller holds s.mu.
 func (st *stream) onAcked(lo, hi uint64, fin bool) {
+	if st.reset || st.saborted {
+		return
+	}
 	st.sacked.add(lo, hi)
 	st.spending.remove(lo, hi)
 	if base := st.sacked.coveredFrom(st.sbase); base > st.sbase {
@@ -163,7 +167,7 @@ func (st *stream) onAcked(lo, hi uint64, fin bool) {
 
 // onLost requeues [lo, hi) minus whatever has been acked since. Caller holds s.mu.
 func (st *stream) onLost(lo, hi uint64, fin bool) {
-	if st.reset {
+	if st.reset || st.saborted {
 		return
 	}
 	lo = max(lo, st.sbase)
@@ -180,7 +184,7 @@ func (st *stream) onLost(lo, hi uint64, fin bool) {
 
 // wantsSend reports whether the stream has something sendable now. Caller holds s.mu.
 func (st *stream) wantsSend() bool {
-	if st.reset {
+	if st.reset || st.saborted {
 		return false
 	}
 	if len(st.spending) > 0 && st.spending[0].lo < st.smax {
@@ -189,8 +193,11 @@ func (st *stream) wantsSend() bool {
 	return st.sfin && !st.sfinSent && !st.sfinAcked && len(st.spending) == 0
 }
 
-// doneSending: every byte and the FIN are acked, or the stream was reset.
-func (st *stream) doneSending() bool { return st.reset || (st.sfin && st.sfinAcked) }
+// doneSending: every byte and the FIN are acked (a FIN can be acked before earlier lost data),
+// or sending was aborted.
+func (st *stream) doneSending() bool {
+	return st.reset || st.saborted || (st.sfin && st.sfinAcked && len(st.sbuf) == 0 && len(st.spending) == 0)
+}
 
 func (st *stream) doneReceiving() bool {
 	return st.reset || st.rclosed || (st.rfin && st.rread == st.rfinOff)

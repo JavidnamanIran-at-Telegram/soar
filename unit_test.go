@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"testing"
+	"time"
 )
 
 func TestRangeSet(t *testing.T) {
@@ -217,4 +218,51 @@ func TestAAAACarrier(t *testing.T) {
 			t.Fatalf("limit %d: %v, got %d bytes want %d", limit, err, len(a.txt), len(data))
 		}
 	}
+}
+
+func newTestStream(t *testing.T) (*session, *stream) {
+	s := newSession(true, streamConfig{StreamWindow: 1 << 16, SendBuffer: 1 << 16, MaxStreams: 4}, nil, nil)
+	st, err := s.openStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s, st
+}
+
+func TestFinAckedBeforeEarlierDataKeepsStream(t *testing.T) {
+	s, st := newTestStream(t)
+	st.sbuf = make([]byte, 20)
+	st.sfin, st.rfin = true, true
+	st.onAcked(10, 20, true) // the FIN's packet arrives; [0,10) is still lost
+	if st.doneSending() {
+		t.Fatal("send side done with [0,10) unacked")
+	}
+	s.maybeRemove(st)
+	if s.streams[st.id] == nil {
+		t.Fatal("stream removed with unacked data")
+	}
+	st.onLost(0, 10, false)
+	if !st.wantsSend() {
+		t.Fatal("lost data not requeued")
+	}
+}
+
+func TestAckAfterPeerResetDoesNotPanic(t *testing.T) {
+	s, st := newTestStream(t)
+	st.sbuf = make([]byte, 20)
+	st.sfin = true
+	st.rfin, st.rbuf = true, []byte("unread")
+	reset := ctrl{typ: frReset, id: st.id}.appendTo(nil)
+	if _, err := s.receive(0, reset, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	st.onAcked(0, 20, true)
+	st.onLost(0, 20, true)
+	if st.wantsSend() {
+		t.Fatal("sending after reset")
+	}
+	other := newStream(s, 9)
+	other.sbuf = make([]byte, 20)
+	other.abort(ErrStreamReset)
+	other.onAcked(0, 20, true)
 }

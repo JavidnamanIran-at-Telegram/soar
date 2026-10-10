@@ -79,12 +79,11 @@ func (c *Config) setDefaults() {
 }
 
 const (
-	limitClasses   = 16 // answer limit = 512 + 48*class
-	outcomeWindow  = 20
-	lateGrace      = 3 * time.Second
-	helloRetry     = time.Second
-	maxHelloPaths  = 16
-	nxdomainToDead = 4
+	limitClasses  = 16 // answer limit = 512 + 48*class
+	outcomeWindow = 20
+	lateGrace     = 3 * time.Second
+	helloRetry    = time.Second
+	maxHelloPaths = 16
 )
 
 // Client tunnels streams through DNS.
@@ -166,7 +165,6 @@ type clientSession struct {
 	ready       chan struct{}
 	established bool
 	backlog     int
-	nx          int
 }
 
 func (cs *clientSession) isClosed() bool {
@@ -478,11 +476,6 @@ func (c *Client) expireLocked(now time.Time) {
 			continue
 		}
 		q.expired = true
-		if q.errRcode == rcodeNXDomain && q.sess != nil && q.sess.established && !q.hello {
-			if q.sess.nx++; q.sess.nx >= nxdomainToDead {
-				q.sess.close(errors.New("soar: server lost the session"))
-			}
-		}
 		c.failLocked(q, now, q.errRcode == rcodeRefused)
 	}
 }
@@ -734,6 +727,20 @@ func (c *Client) onAnswer(msg []byte) {
 	late := q.expired
 	p.maxAnswered = max(p.maxAnswered, q.seq+1)
 	if a.tc || a.rcode != rcodeOK || !a.hasTXT {
+		if a.rcode == rcodeNXDomain {
+			// Only a reply the server signed over this question ends the session; an unsigned
+			// NXDOMAIN may be injected, so it's ignored like a forged NOERROR.
+			cs := q.sess
+			if !q.hello && cs != nil && cs.established && len(a.txt) == sigLen &&
+				ed25519.Verify(c.cfg.ServerKey, unknownSessionMsg(q.question), a.txt) {
+				cs.close(errors.New("soar: server lost the session"))
+				if !late {
+					delete(c.pending, a.txn)
+					c.failLocked(q, now, false)
+				}
+			}
+			return
+		}
 		if late || q.errRcode >= 0 {
 			return
 		}
@@ -782,7 +789,6 @@ func (c *Client) onAnswer(msg []byte) {
 	}
 	delete(c.pending, a.txn)
 	dbg("cli recv pn=%d for up=%d plain=%x", pn, q.pn, plain)
-	cs.nx = 0
 	held := time.Duration(plain[0]) * 10 * time.Millisecond
 	cs.backlog = int(plain[1])
 	if _, err := cs.receive(pn, plain[2:], now); err != nil {
