@@ -272,6 +272,10 @@ func (s *session) peerStream(id uint64) *stream {
 	if st := s.streams[id]; st != nil {
 		return st
 	}
+	// A closed session already released its streams; accepting more would leak their accounting.
+	if s.closed {
+		return nil
+	}
 	// Clients open ids in order, so a window around the highest seen bounds what we track: an id
 	// below it opens only if it was skipped (its first packet arrived late), else it's closed.
 	if s.client || id >= s.peerNext+uint64(s.cfg.MaxStreams) {

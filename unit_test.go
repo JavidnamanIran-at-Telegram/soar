@@ -366,3 +366,23 @@ func TestServerStreamCountFollowsSession(t *testing.T) {
 		t.Fatalf("open = %d after session close, want 0", open)
 	}
 }
+
+func TestClosedSessionAcceptsNoStreams(t *testing.T) {
+	s := newSession(false, streamConfig{StreamWindow: 1 << 16, SendBuffer: 1 << 16, MaxStreams: 8}, nil, nil)
+	open := 0
+	s.acceptFn = func(st *stream) bool {
+		if st != nil {
+			open++
+		}
+		return true
+	}
+	s.streamGone = func() { open-- }
+	s.peerStream(0)
+	s.close(ErrClosed)
+	s.mu.Lock()
+	got := s.peerStream(1)
+	s.mu.Unlock()
+	if got != nil || open != 0 {
+		t.Fatalf("closed session accepted a stream (open=%d)", open)
+	}
+}
