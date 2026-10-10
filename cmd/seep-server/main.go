@@ -36,6 +36,7 @@ func main() {
 	keyFile := flag.String("key-file", "", "file holding the base64 private key (from keygen)")
 	listen := flag.String("listen", ":53", "UDP address to serve DNS on")
 	ports := flag.String("allow-ports", "80,443", `destination ports streams may reach, or "any"`)
+	private := flag.Bool("allow-private", false, "allow non-public destinations (lab use only)")
 	verbose := flag.Bool("v", false, "debug logging")
 	flag.Parse()
 	if *zone == "" || *keyFile == "" {
@@ -57,6 +58,9 @@ func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
 	dialer := &net.Dialer{Control: seep.PublicOnly}
+	if *private {
+		dialer.Control = nil
+	}
 	allowed := strings.Split(*ports, ",")
 	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		_, port, err := net.SplitHostPort(addr)

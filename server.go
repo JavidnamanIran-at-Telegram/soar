@@ -468,22 +468,53 @@ func PublicOnly(network, address string, _ syscall.RawConn) error {
 	if err != nil {
 		return err
 	}
-	if a := ap.Addr(); !isPublic(a) {
+	if a := ap.Addr(); !isPublic(a) || isLocal(a) {
 		return fmt.Errorf("seep: destination %s is not public", a)
 	}
 	return nil
 }
 
+// localAddrs caches this host's interface addresses: dialing our own public IP would reach
+// services bound to all interfaces from inside, past firewalls that only filter outside traffic.
+var localAddrs struct {
+	sync.Mutex
+	set map[netip.Addr]bool
+	at  time.Time
+}
+
+func isLocal(a netip.Addr) bool {
+	a = a.Unmap()
+	localAddrs.Lock()
+	defer localAddrs.Unlock()
+	if localAddrs.set == nil || time.Since(localAddrs.at) > time.Minute {
+		set := make(map[netip.Addr]bool)
+		if addrs, err := net.InterfaceAddrs(); err == nil {
+			for _, ia := range addrs {
+				if pfx, err := netip.ParsePrefix(ia.String()); err == nil {
+					set[pfx.Addr().Unmap()] = true
+				}
+			}
+		}
+		localAddrs.set, localAddrs.at = set, time.Now()
+	}
+	return localAddrs.set[a]
+}
+
 var nonPublic = []netip.Prefix{
-	netip.MustParsePrefix("0.0.0.0/8"),      // "this network"
-	netip.MustParsePrefix("100.64.0.0/10"),  // CGNAT
-	netip.MustParsePrefix("192.0.0.0/24"),   // IETF protocol assignments
-	netip.MustParsePrefix("198.18.0.0/15"),  // benchmarking
-	netip.MustParsePrefix("240.0.0.0/4"),    // reserved
-	netip.MustParsePrefix("::/96"),          // IPv4-compatible (deprecated)
-	netip.MustParsePrefix("64:ff9b:1::/48"), // local-use NAT64
-	netip.MustParsePrefix("2001::/32"),      // Teredo: tunnels to arbitrary IPv4
-	netip.MustParsePrefix("fec0::/10"),      // site-local (deprecated)
+	netip.MustParsePrefix("0.0.0.0/8"),       // "this network"
+	netip.MustParsePrefix("100.64.0.0/10"),   // CGNAT
+	netip.MustParsePrefix("192.0.0.0/24"),    // IETF protocol assignments
+	netip.MustParsePrefix("198.18.0.0/15"),   // benchmarking
+	netip.MustParsePrefix("240.0.0.0/4"),     // reserved
+	netip.MustParsePrefix("::/96"),           // IPv4-compatible (deprecated)
+	netip.MustParsePrefix("64:ff9b:1::/48"),  // local-use NAT64
+	netip.MustParsePrefix("2001::/32"),       // Teredo: tunnels to arbitrary IPv4
+	netip.MustParsePrefix("fec0::/10"),       // site-local (deprecated)
+	netip.MustParsePrefix("::ffff:0:0:0/96"), // IPv4-translated (SIIT)
+	netip.MustParsePrefix("100::/64"),        // discard-only
+	netip.MustParsePrefix("2001:db8::/32"),   // documentation
+	netip.MustParsePrefix("2001:2::/48"),     // benchmarking
+	netip.MustParsePrefix("2001:10::/28"),    // ORCHID
 }
 
 func isPublic(a netip.Addr) bool {

@@ -241,11 +241,25 @@ func TestPublicOnly(t *testing.T) {
 		"100.64.0.1:80": false, "[::1]:443": false, "[fd00::1]:80": false, "0.0.0.0:80": false,
 		"0.1.2.3:80": false, "[::ffff:127.0.0.1]:80": false, "[64:ff9b::7f00:1]:80": false,
 		"[64:ff9b::a9fe:a9fe]:80": false, "[2002:7f00:1::]:80": false, "[2001:0:1::1]:80": false,
-		"[::127.0.0.1]:80": false, "[64:ff9b::808:808]:443": true, "[2002:808:808::]:443": true,
+		"[::127.0.0.1]:80": false, "[::ffff:0:7f00:1]:80": false, "[64:ff9b::808:808]:443": true, "[2002:808:808::]:443": true,
 		"8.8.8.8:443": true, "[2606:4700::1111]:443": true,
 	} {
 		if err := PublicOnly("tcp", addr, nil); (err == nil) != ok {
 			t.Errorf("%s: allowed=%v, want %v", addr, err == nil, ok)
+		}
+	}
+}
+
+func TestPublicOnlyRefusesOwnAddresses(t *testing.T) {
+	addrs, _ := net.InterfaceAddrs()
+	for _, ia := range addrs {
+		ipn, ok := ia.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		addr := net.JoinHostPort(ipn.IP.String(), "443")
+		if err := PublicOnly("tcp", addr, nil); err == nil {
+			t.Errorf("own address %s allowed", addr)
 		}
 	}
 }

@@ -20,7 +20,10 @@ type Config struct {
 	Zone      string
 	ServerKey ed25519.PublicKey
 	// Resolvers are recursive resolvers (host:port) to tunnel through. All are used at once.
+	// May be empty when Discovery is enabled.
 	Resolvers []string
+	// Discovery finds more resolvers that carry the tunnel.
+	Discovery Discovery
 	// SafeQName is the name length every path starts at; some networks drop longer names (Iran
 	// ~101). Paths probe up to MaxQName. Defaults 101 and 253.
 	SafeQName, MaxQName int
@@ -72,6 +75,7 @@ func (c *Config) setDefaults() {
 	if c.TCP == "" {
 		c.TCP = "auto"
 	}
+	c.Discovery.setDefaults()
 }
 
 const (
@@ -97,6 +101,11 @@ type Client struct {
 	done    chan struct{}
 	once    sync.Once
 
+	cands          []string // discovery candidates, in order
+	candIdx        int
+	lastCand       time.Time
+	cachedVerified int
+
 	lastDump time.Time
 }
 
@@ -104,6 +113,7 @@ type path struct {
 	addr      *net.UDPAddr
 	tcp       *tcpLink // nil for UDP
 	sibling   bool     // a TCP path was added for this UDP path
+	candidate bool     // added by discovery; pruned if it never answers
 	srtt      time.Duration
 	rttvar    time.Duration
 	hasRTT    bool
@@ -177,8 +187,8 @@ func NewClient(cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(cfg.Resolvers) == 0 {
-		return nil, errors.New("seep: no resolvers")
+	if len(cfg.Resolvers) == 0 && !cfg.Discovery.Enabled {
+		return nil, errors.New("seep: no resolvers and discovery is off")
 	}
 	pc, err := net.ListenPacket("udp", ":0")
 	if err != nil {
@@ -191,9 +201,12 @@ func NewClient(cfg Config) (*Client, error) {
 			cfg.Logger.Warn("bad resolver", "resolver", r, "err", err)
 		}
 	}
-	if len(c.paths) == 0 {
+	if len(c.paths) == 0 && !cfg.Discovery.Enabled {
 		pc.Close()
 		return nil, errors.New("seep: no usable resolvers")
+	}
+	if cfg.Discovery.Enabled {
+		c.cands = cfg.Discovery.candidates()
 	}
 	go c.readLoop()
 	go c.run()
@@ -325,6 +338,7 @@ func (c *Client) run() {
 		now := time.Now()
 		c.mu.Lock()
 		c.expireLocked(now)
+		c.discoverLocked(now)
 		c.addTCPSiblingsLocked()
 		c.fillLocked(now)
 		if debugOn && now.Sub(c.lastDump) > 250*time.Millisecond {
@@ -523,6 +537,12 @@ func (c *Client) fillLocked(now time.Time) {
 	}
 	if cs.closed {
 		return
+	}
+	// Keep one probe on each unverified path, so new and recovering resolvers get vetted.
+	for _, p := range c.paths {
+		if !p.verified && p.inflight == 0 && p.usable(now) {
+			c.sendDataLocked(cs, p, now, false)
+		}
 	}
 	for {
 		inflight, polls := 0, 0
