@@ -784,7 +784,7 @@ func (c *Client) failLocked(q *pendingQuery, now time.Time, refused bool) {
 // wantQueries is how many queries the session wants outstanding with nothing else to send.
 func (cs *clientSession) wantQueries() int {
 	if len(cs.streams) == 0 {
-		if len(cs.toAck) > 0 || len(cs.sent) > 0 {
+		if len(cs.toAck) > 0 || cs.dataInFlight() {
 			return 1
 		}
 		return 0
@@ -804,8 +804,16 @@ func (c *Client) fillLocked(now time.Time) {
 	if cs.isClosed() {
 		return
 	}
-	// Keep one probe on each unverified path, so new and recovering resolvers get vetted.
+	// Keep one probe on each unverified path, so new and recovering resolvers get vetted, but
+	// only while there's real traffic: a lost probe's ack and LOST bookkeeping mustn't count, or
+	// it would beget another probe and an idle session would never go quiet.
+	cs.mu.Lock()
+	busy := len(cs.streams) > 0 || len(cs.ctrlQ) > 0 || cs.dataInFlight()
+	cs.mu.Unlock()
 	for _, p := range c.paths {
+		if !busy {
+			break
+		}
 		if c.liveQueriesLocked() >= c.cfg.MaxInflight {
 			break
 		}

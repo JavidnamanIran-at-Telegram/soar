@@ -367,6 +367,18 @@ func (s *session) acked(p *sentPkt) {
 	}
 }
 
+// dataInFlight reports whether a sent packet still carries stream or control frames. Ack- and
+// lost-only packets are tracked for re-conveying but don't justify a query on their own, or an
+// unanswered one would keep an idle session polling. Caller holds s.mu.
+func (s *session) dataInFlight() bool {
+	for _, p := range s.sent {
+		if len(p.streams) > 0 || len(p.ctrls) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // declareLost requeues a lost packet's contents. Caller holds s.mu.
 func (s *session) declareLost(pn uint64) {
 	p := s.sent[pn]

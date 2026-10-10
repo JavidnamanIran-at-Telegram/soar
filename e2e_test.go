@@ -1112,3 +1112,36 @@ func TestTCPOnlyThroughCustomDialer(t *testing.T) {
 		t.Fatal("custom TCP dialer unused")
 	}
 }
+
+// An idle session must go quiet, even with a resolver that never answers: acking, LOST reports
+// and probes of unverified paths mustn't sustain each other.
+func TestIdleSessionGoesQuiet(t *testing.T) {
+	if testing.Short() {
+		t.Skip("idles for several seconds")
+	}
+	srv, pub := startServer(t)
+	origin := startOrigin(t)
+	good, sent := countingForwarder(t, srv)
+	var deadSent atomic.Int64
+	dead, _ := net.ListenPacket("udp", "127.0.0.1:0")
+	defer dead.Close()
+	go func() {
+		b := make([]byte, 65536)
+		for {
+			if _, _, err := dead.ReadFrom(b); err != nil {
+				return
+			}
+			deadSent.Add(1)
+		}
+	}()
+	c, _ := NewClient(Config{Zone: testZone, ServerKey: pub, Resolvers: []string{good, dead.LocalAddr().String()}})
+	defer c.Close()
+	fetch(t, c, origin, 20000)
+	time.Sleep(3 * time.Second) // let acks, LOST reports and the dead path's probes settle
+	a, d := sent.Load(), deadSent.Load()
+	time.Sleep(6 * time.Second)
+	if n := sent.Load() - a + deadSent.Load() - d; n > 0 {
+		t.Fatalf("idle session sent %d queries", n)
+	}
+	fetch(t, c, origin, 20000)
+}
