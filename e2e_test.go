@@ -743,16 +743,24 @@ func TestHelloFloodDoesNotStallSessions(t *testing.T) {
 	defer flood.Close()
 	saddr, _ := net.ResolveUDPAddr("udp", srv)
 	stop := make(chan struct{})
+	// A fixed 5000 hellos/s, far beyond what the server can handshake under -race. An unpaced
+	// flood from this process would instead measure how fast the host reads packets, and on a
+	// small CI runner crowd out the client's queries in the kernel.
 	go func() {
 		eph := make([]byte, 2+pubLen)
-		for i := uint16(1); ; i++ {
+		tick := time.NewTicker(10 * time.Millisecond)
+		defer tick.Stop()
+		for i := uint16(1); ; {
 			select {
 			case <-stop:
 				return
-			default:
+			case <-tick.C:
 			}
-			rand.Read(eph[2:])
-			flood.WriteTo(appendQuery(nil, i, eph, z, typeTXT, 1232), saddr)
+			for range 50 {
+				rand.Read(eph[2:])
+				flood.WriteTo(appendQuery(nil, i, eph, z, typeTXT, 1232), saddr)
+				i++
+			}
 		}
 	}()
 	defer close(stop)

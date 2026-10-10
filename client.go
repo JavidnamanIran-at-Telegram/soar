@@ -719,10 +719,13 @@ func (c *Client) expireLocked(now time.Time) {
 			continue
 		}
 		q.expired = true
-		if q.errTC {
+		// A held error answer may be forged, so it only counts once no real answer came in the
+		// whole deadline; expired early by the packet threshold, the real one may yet arrive.
+		trusted := !now.Before(q.deadline)
+		if q.errTC && trusted {
 			q.p.sizeTruncated(q.class, now) // answers this size get truncated here
 		}
-		c.failLocked(q, now, q.errRcode == rcodeRefused)
+		c.failLocked(q, now, q.errRcode == rcodeRefused && trusted)
 	}
 }
 
