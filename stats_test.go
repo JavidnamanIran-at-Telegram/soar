@@ -2,6 +2,7 @@ package soar
 
 import (
 	"crypto/ed25519"
+	"strings"
 	"testing"
 )
 
@@ -35,5 +36,32 @@ func TestPathStatsSnapshot(t *testing.T) {
 		if c.Established() {
 			t.Fatal("no session without a server")
 		}
+	}
+}
+
+func TestStreamOnlyGetsTCPPathOnly(t *testing.T) {
+	pub, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := NewClient(Config{
+		Zone:       "t.example.org",
+		ServerKey:  pub,
+		Resolvers:  []string{"127.0.0.1:1", "127.0.0.1:853"},
+		TCP:        "on", // even with UDP+TCP for everyone else
+		StreamOnly: func(r string) bool { return r == "127.0.0.1:853" },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := c.PathStats()
+	c.Close()
+	var got []string
+	for _, s := range st {
+		got = append(got, s.Resolver+"/"+s.Transport)
+	}
+	want := "127.0.0.1:1/udp 127.0.0.1:1/tcp 127.0.0.1:853/tcp"
+	if g := strings.Join(got, " "); g != want {
+		t.Fatalf("paths %q, want %q", g, want)
 	}
 }
