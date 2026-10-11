@@ -85,7 +85,8 @@ Delegate a zone (say `t.example.com`) to a host with an `NS` record, then:
 
 ```sh
 go install github.com/getlantern/soar/cmd/soar-server@latest
-soar-server keygen                 # prints the private key (keep it) and the public key (ship it)
+(umask 077; soar-server keygen | awk '$1 == "private" { print $2 }' > key)  # private key, mode 600
+soar-server pubkey key             # the public key (ship it with clients)
 soar-server -zone t.example.com -key-file key -listen :53
 ```
 
