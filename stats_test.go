@@ -1,0 +1,39 @@
+package soar
+
+import (
+	"crypto/ed25519"
+	"testing"
+)
+
+func TestPathStatsSnapshot(t *testing.T) {
+	pub, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		tcp, transport string
+	}{{"off", "udp"}, {"only", "tcp"}} {
+		c, err := NewClient(Config{
+			Zone:      "t.example.org",
+			ServerKey: pub,
+			Resolvers: []string{"127.0.0.1:1", "[::1]:1"},
+			TCP:       tc.tcp,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		st := c.PathStats()
+		c.Close()
+		if len(st) != 2 || st[0].Resolver != "127.0.0.1:1" || st[1].Resolver != "[::1]:1" {
+			t.Fatalf("TCP=%s: paths in configuration order: %+v", tc.tcp, st)
+		}
+		for _, s := range st {
+			if s.Transport != tc.transport || s.Verified || s.AnswerBytes < 512 || s.NameLen <= 0 || s.RecordType != "TXT" {
+				t.Fatalf("TCP=%s: fresh path: %+v", tc.tcp, s)
+			}
+		}
+		if c.Established() {
+			t.Fatal("no session without a server")
+		}
+	}
+}
