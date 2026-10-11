@@ -1,0 +1,928 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta property="og:title" content="Soar">
+<meta property="og:description" content="A DNS tunnel for networks that block everything except DNS.">
+<meta property="og:url" content="https://soar.lantern.io/">
+<meta property="og:type" content="website">
+<link rel="canonical" href="https://soar.lantern.io/">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 26 26'%3E%3Ccircle cx='13' cy='13' r='11' fill='none' stroke='%2318222d' stroke-width='2'/%3E%3Cpath d='M5 17 L13 6 L21 17' fill='none' stroke='%23a8155f' stroke-width='2.4' stroke-linejoin='round'/%3E%3C/svg%3E">
+<title>Soar</title>
+<meta name="description" content="Soar is a DNS tunnel for networks that block everything except DNS. It uses every resolver at once, survives forged answers and blocked UDP, and connects in under a second.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Saira+Condensed:wght@500;600;700;800&family=Literata:ital,opsz,wght@0,7..72,400;0,7..72,600;1,7..72,400&family=Martian+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: an aeronautical chart. Paper ground, magenta and blue chart inks, the censored
+   network drawn as restricted airspace; one wide column with full-bleed chart bands. */
+:root {
+  --paper: #eef1ea;
+  --paper-2: #e3e8de;
+  --ink: #18222d;
+  --ink-2: #4a5866;
+  --rule: #c3ccc0;
+  --magenta: #a8155f;
+  --blue: #1d5aa0;
+  --fail: #8a939c;
+  --code-bg: #f7f8f4;
+  --display: "Saira Condensed", "Arial Narrow", "Roboto Condensed", sans-serif;
+  --body: "Literata", Georgia, "Times New Roman", serif;
+  --mono: "Martian Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --wrap: 1120px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0e151d; --paper-2: #141e29; --ink: #e2e8ee; --ink-2: #9aa8b6; --rule: #2a3846;
+    --magenta: #ff6fb5; --blue: #72aefc; --fail: #6b7783; --code-bg: #111a24; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0e151d; --paper-2: #141e29; --ink: #e2e8ee; --ink-2: #9aa8b6; --rule: #2a3846;
+  --magenta: #ff6fb5; --blue: #72aefc; --fail: #6b7783; --code-bg: #111a24; color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body {
+  margin: 0; background: var(--paper); color: var(--ink);
+  font: 400 17px/1.65 var(--body);
+  background-image:
+    linear-gradient(var(--rule) 1px, transparent 1px),
+    linear-gradient(90deg, var(--rule) 1px, transparent 1px);
+  background-size: 96px 96px;
+  background-position: -1px -1px;
+  background-attachment: fixed;
+}
+body::before {
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: -1;
+  background: radial-gradient(ellipse at 50% 0%, transparent 0%, var(--paper) 70%);
+  opacity: .85;
+}
+a { color: var(--blue); text-underline-offset: 3px; }
+a:hover { color: var(--magenta); }
+:focus-visible { outline: 2px solid var(--magenta); outline-offset: 3px; }
+.wrap { max-width: var(--wrap); margin: 0 auto; padding-inline: 20px; }
+h1, h2, h3 { font-family: var(--display); text-wrap: balance; line-height: 1.02; margin: 0; }
+h2 { font-size: clamp(2.2rem, 5vw, 3.4rem); font-weight: 700; letter-spacing: -.01em; }
+h3 { font-size: 1.45rem; font-weight: 700; letter-spacing: .01em; }
+p { margin: 0; max-width: 66ch; }
+code { font-family: var(--mono); font-size: .8em; }
+.label {
+  font: 600 .78rem/1 var(--display); letter-spacing: .16em; text-transform: uppercase;
+  color: var(--magenta); display: inline-flex; align-items: center; gap: .6em;
+}
+.label::before { content: ""; width: 22px; height: 2px; background: currentColor; }
+.lede { font-size: 1.12rem; color: var(--ink-2); }
+
+/* top bar */
+.bar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-block: 18px; }
+.mark { display: flex; align-items: center; gap: 10px; font: 800 1.35rem/1 var(--display); letter-spacing: .08em; text-transform: uppercase; color: var(--ink); text-decoration: none; }
+.mark svg { width: 26px; height: 26px; }
+.nav { display: flex; flex-wrap: wrap; gap: 6px 22px; font: 600 .82rem/1 var(--display); letter-spacing: .12em; text-transform: uppercase; }
+.nav a { color: var(--ink-2); text-decoration: none; }
+.nav a:hover { color: var(--magenta); }
+
+/* hero */
+.hero { padding-block: 28px 8px; display: grid; gap: 28px; }
+.hero h1 {
+  font-size: clamp(5.5rem, 19vw, 13.5rem); font-weight: 800; letter-spacing: -.035em; line-height: .8;
+  text-transform: uppercase; display: flex; align-items: flex-end; gap: .08em; flex-wrap: wrap;
+}
+.hero h1 .soa { color: var(--ink); }
+.hero h1 .r { color: var(--magenta); position: relative; }
+.hero h1 small {
+  font: 500 .95rem/1.35 var(--mono); letter-spacing: 0; text-transform: none; color: var(--ink-2);
+  max-width: 22ch; padding-bottom: .9em; margin-left: .4em;
+}
+.hero h1 small b { color: var(--magenta); font-weight: 500; }
+.thesis { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 28px 48px; align-items: end; }
+.thesis p.big { font: 600 clamp(1.5rem, 3.2vw, 2.15rem)/1.18 var(--display); max-width: 24ch; letter-spacing: .005em; }
+.cta { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 18px; }
+.btn {
+  font: 700 .9rem/1 var(--display); letter-spacing: .12em; text-transform: uppercase; text-decoration: none;
+  padding: 14px 18px; border: 2px solid var(--ink); color: var(--ink); background: transparent;
+}
+.btn.primary { background: var(--ink); color: var(--paper); }
+.btn:hover { border-color: var(--magenta); color: var(--magenta); background: transparent; }
+.btn.primary:hover { background: var(--magenta); border-color: var(--magenta); color: var(--paper); }
+
+.byline { font: 600 .8rem/1 var(--display); letter-spacing: .16em; text-transform: uppercase; color: var(--ink-2); }
+.byline a { color: var(--magenta); text-decoration: none; border-bottom: 2px solid currentColor; }
+.kin { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 32px 56px; align-items: start; }
+.kin p + p { margin-top: 1em; }
+.tiers { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.tiers li { border: 2px solid var(--ink); padding: 14px 16px; display: grid; gap: 6px; background: var(--paper); }
+.tiers li.last { border-style: dashed; border-color: var(--magenta); }
+.tiers b { font: 700 .74rem/1 var(--display); letter-spacing: .16em; text-transform: uppercase; color: var(--ink-2); }
+.tiers li.last b { color: var(--magenta); }
+.tiers span { font: 500 .78rem/1.5 var(--mono); }
+
+/* chart band */
+.chart {
+  position: relative; border-top: 2px solid var(--ink); border-bottom: 2px solid var(--ink);
+  background: var(--paper-2); margin-top: 8px;
+}
+.chart canvas { display: block; width: 100%; height: clamp(300px, 42vw, 440px); }
+.chart .legend {
+  display: flex; flex-wrap: wrap; gap: 8px 22px; padding: 10px 20px; border-top: 1px solid var(--rule);
+  font: 500 .7rem/1.4 var(--mono); color: var(--ink-2); justify-content: center;
+}
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
+.legend .q { background: var(--magenta); }
+.legend .a { background: var(--blue); }
+.legend .x { background: transparent; border: 2px solid var(--fail); border-radius: 0; transform: rotate(45deg); width: 9px; height: 9px; }
+
+/* figures */
+.figures { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-bottom: 1px solid var(--rule); }
+.fig { padding: 26px 22px 26px 0; display: grid; gap: 6px; align-content: start; }
+.fig + .fig { padding-left: 22px; border-left: 1px solid var(--rule); }
+.fig .n { font: 700 clamp(2.6rem, 6vw, 3.8rem)/.9 var(--display); color: var(--ink); font-variant-numeric: tabular-nums; }
+.fig .n em { font-style: normal; color: var(--magenta); font-size: .5em; margin-left: .15em; letter-spacing: .04em; }
+.fig p { font-size: .95rem; color: var(--ink-2); }
+
+/* sections */
+section { padding-block: 92px 20px; }
+.head { display: grid; gap: 14px; margin-bottom: 40px; }
+
+/* the name */
+.name { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr); gap: 40px 56px; align-items: center; }
+.name p + p { margin-top: 1em; }
+.zone {
+  font: 400 .8rem/1.75 var(--mono); background: var(--code-bg); border: 1px solid var(--rule);
+  padding: 22px 24px; overflow-x: auto; white-space: pre; color: var(--ink-2); margin: 0;
+  box-shadow: 8px 8px 0 var(--paper-2);
+}
+.zone b { color: var(--magenta); font-weight: 500; }
+.zone u { color: var(--blue); text-decoration: none; }
+.zone s { color: var(--fail); text-decoration: none; }
+
+/* life of a request */
+.flight { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; counter-reset: leg; border-top: 1px solid var(--rule); }
+.leg {
+  display: grid; grid-template-columns: 74px minmax(0, 1fr) minmax(0, 1.1fr); gap: 8px 32px;
+  padding-block: 26px; border-bottom: 1px solid var(--rule); align-items: start;
+}
+.leg::before {
+  counter-increment: leg; content: counter(leg, decimal-leading-zero);
+  font: 700 2.1rem/1 var(--display); color: var(--magenta); font-variant-numeric: tabular-nums;
+}
+.leg h3 { margin-bottom: 6px; }
+.leg .what { color: var(--ink-2); font-size: .98rem; }
+.leg pre {
+  margin: 0; font: 400 .72rem/1.7 var(--mono); background: var(--code-bg); border: 1px solid var(--rule);
+  padding: 14px 16px; overflow-x: auto; color: var(--ink-2); min-width: 0;
+}
+.leg pre b { color: var(--magenta); font-weight: 500; }
+.leg pre u { color: var(--blue); text-decoration: none; }
+
+/* principles */
+.principles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0; border-top: 2px solid var(--ink); }
+.principle { padding: 28px 28px 30px 0; border-bottom: 1px solid var(--rule); display: grid; gap: 10px; align-content: start; }
+.principle:nth-child(even) { padding-left: 28px; padding-right: 0; border-left: 1px solid var(--rule); }
+.principle h3 { display: flex; gap: 12px; align-items: baseline; }
+.principle h3 svg { flex: none; width: 18px; height: 18px; transform: translateY(2px); }
+.principle p { color: var(--ink-2); font-size: .98rem; }
+
+/* censors */
+.censors { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
+.airspace {
+  position: relative; padding: 26px 22px 22px; display: grid; gap: 14px; align-content: start;
+  border: 2px solid var(--blue); background: var(--paper);
+}
+.airspace::before {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: repeating-linear-gradient(-45deg, transparent 0 9px, color-mix(in srgb, var(--blue) 9%, transparent) 9px 11px);
+}
+.airspace > * { position: relative; }
+.airspace .id { font: 700 .74rem/1 var(--display); letter-spacing: .18em; color: var(--blue); text-transform: uppercase; }
+.airspace h3 { font-size: 2.1rem; }
+.airspace dl { margin: 0; display: grid; gap: 12px; }
+.airspace dt { font: 600 .72rem/1 var(--display); letter-spacing: .14em; text-transform: uppercase; color: var(--ink-2); margin-bottom: 4px; }
+.airspace dd { margin: 0; font-size: .93rem; }
+.airspace .score {
+  margin-top: 4px; padding-top: 14px; border-top: 1px dashed var(--blue);
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+}
+.airspace .score b { font: 700 2.4rem/1 var(--display); color: var(--magenta); font-variant-numeric: tabular-nums; }
+.airspace .score span { font: 400 .72rem/1.5 var(--mono); color: var(--ink-2); }
+
+/* benchmarks */
+.bench { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 32px; align-items: start; }
+.tabs { display: grid; gap: 2px; position: sticky; top: calc(env(safe-area-inset-top, 0px) + 16px); }
+.tab {
+  appearance: none; border: 0; background: transparent; text-align: left; cursor: pointer; color: var(--ink-2);
+  font: 600 1.05rem/1 var(--display); letter-spacing: .04em; padding: 11px 12px; border-left: 3px solid var(--rule);
+  display: flex; justify-content: space-between; gap: 10px; align-items: baseline;
+}
+.tab small { font: 400 .68rem/1 var(--mono); color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.tab:hover { color: var(--ink); border-left-color: var(--ink-2); }
+.tab[aria-selected="true"] { color: var(--ink); border-left-color: var(--magenta); background: var(--paper-2); }
+.tab[aria-selected="true"] small { color: var(--magenta); }
+.panel { min-width: 0; }
+.panel .scen { display: grid; gap: 8px; margin-bottom: 22px; }
+.panel .scen h3 { font-size: 2rem; }
+.panel .scen p { color: var(--ink-2); font-size: .97rem; }
+.imp { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.imp span { font: 400 .68rem/1 var(--mono); border: 1px solid var(--rule); padding: 6px 8px; color: var(--ink-2); background: var(--paper); }
+.rows { display: grid; gap: 4px; }
+.row {
+  display: grid; grid-template-columns: 150px minmax(0, 1fr) 82px; gap: 14px; align-items: center;
+  padding-block: 7px; border-bottom: 1px dotted var(--rule);
+}
+.row .who { font: 600 .98rem/1.1 var(--display); letter-spacing: .02em; }
+.row .who small { display: block; font: 400 .62rem/1.4 var(--mono); color: var(--ink-2); letter-spacing: 0; }
+.track { position: relative; height: 22px; }
+.fill {
+  position: absolute; inset: 0 auto 0 0; background: var(--ink-2); opacity: .55;
+  transform-origin: left; transition: width .55s cubic-bezier(.2,.7,.2,1);
+}
+.row.soar .fill { background: var(--magenta); opacity: 1; }
+.row.soar .who { color: var(--magenta); }
+.val { font: 500 .78rem/1 var(--mono); position: absolute; top: 50%; transform: translateY(-50%); white-space: nowrap; color: var(--ink); font-variant-numeric: tabular-nums; }
+.row.failed .track {
+  background: repeating-linear-gradient(-45deg, transparent 0 6px, color-mix(in srgb, var(--fail) 35%, transparent) 6px 8px);
+  border: 1px dashed var(--fail);
+}
+.row.failed .val { left: 10px; color: var(--ink-2); }
+.conn { font: 400 .74rem/1.2 var(--mono); color: var(--ink-2); text-align: right; font-variant-numeric: tabular-nums; }
+.row.soar .conn { color: var(--magenta); }
+.rowhead { display: grid; grid-template-columns: 150px minmax(0, 1fr) 82px; gap: 14px; font: 600 .7rem/1 var(--display); letter-spacing: .14em; text-transform: uppercase; color: var(--ink-2); padding-bottom: 8px; border-bottom: 2px solid var(--ink); }
+.rowhead span:last-child { text-align: right; }
+.method { margin-top: 26px; display: grid; gap: 10px; font-size: .9rem; color: var(--ink-2); }
+.method p { max-width: 80ch; }
+@media (prefers-reduced-motion: reduce) { .fill { transition: none; } }
+
+/* overview */
+.overview { margin-top: 56px; overflow-x: auto; border-top: 2px solid var(--ink); }
+.overview table { width: 100%; border-collapse: collapse; min-width: 560px; font-variant-numeric: tabular-nums; }
+.overview th, .overview td { text-align: left; padding: 11px 12px 11px 0; border-bottom: 1px solid var(--rule); font-size: .92rem; vertical-align: baseline; }
+.overview th { font: 600 .7rem/1 var(--display); letter-spacing: .14em; text-transform: uppercase; color: var(--ink-2); }
+.overview td.num { font-family: var(--mono); font-size: .8rem; }
+.overview td.soarv { color: var(--magenta); font-weight: 600; }
+.overview td.x { font: 700 1.1rem/1 var(--display); }
+.overview td.x.lose { color: var(--ink-2); }
+.overview td.other { color: var(--ink-2); font-size: .85rem; }
+
+/* wire + crypto */
+.wire { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; }
+.wire figure { margin: 0; display: grid; gap: 10px; min-width: 0; }
+.wire figcaption { font: 600 .74rem/1 var(--display); letter-spacing: .16em; text-transform: uppercase; color: var(--ink-2); }
+.packet { display: flex; flex-wrap: wrap; border: 2px solid var(--ink); }
+.packet div { padding: 10px 10px 8px; border-right: 1px solid var(--rule); display: grid; gap: 4px; flex: 1 1 auto; min-width: 0; }
+.packet div:last-child { border-right: 0; }
+.packet b { font: 600 .82rem/1.15 var(--display); letter-spacing: .02em; }
+.packet span { font: 400 .62rem/1 var(--mono); color: var(--ink-2); }
+.packet .sealed { background: color-mix(in srgb, var(--magenta) 9%, transparent); }
+.packet .tag { background: color-mix(in srgb, var(--blue) 10%, transparent); }
+.wire .note { font-size: .9rem; color: var(--ink-2); }
+.frames { margin-top: 28px; display: flex; flex-wrap: wrap; gap: 8px; }
+.frames span { font: 500 .72rem/1 var(--mono); padding: 8px 10px; border: 1px solid var(--ink); }
+.crypto { margin-top: 44px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; border-top: 1px solid var(--rule); }
+.crypto div { padding: 22px 22px 22px 0; display: grid; gap: 8px; align-content: start; }
+.crypto div + div { padding-left: 22px; border-left: 1px solid var(--rule); }
+.crypto h3 { font-size: 1.2rem; }
+.crypto p { font-size: .93rem; color: var(--ink-2); }
+
+/* start */
+.start { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; }
+.term { margin: 0; min-width: 0; display: grid; }
+.term .top { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 14px; background: var(--ink); color: var(--paper); font: 600 .74rem/1 var(--display); letter-spacing: .14em; text-transform: uppercase; }
+.term button { appearance: none; border: 1px solid currentColor; background: transparent; color: inherit; font: 600 .68rem/1 var(--display); letter-spacing: .12em; text-transform: uppercase; padding: 6px 9px; cursor: pointer; }
+.term button:hover { color: var(--magenta); }
+.term pre { margin: 0; padding: 18px; background: var(--code-bg); border: 2px solid var(--ink); border-top: 0; font: 400 .76rem/1.75 var(--mono); overflow-x: auto; color: var(--ink); }
+.term pre i { color: var(--ink-2); font-style: normal; }
+.term pre b { color: var(--magenta); font-weight: 500; }
+.start-note { margin-top: 22px; color: var(--ink-2); font-size: .95rem; }
+
+/* status + footer */
+.status { margin-top: 92px; border: 2px solid var(--magenta); padding: 26px 28px; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 18px 26px; align-items: start; }
+.status .tagline { font: 800 1.1rem/1 var(--display); letter-spacing: .16em; text-transform: uppercase; color: var(--magenta); writing-mode: vertical-rl; transform: rotate(180deg); }
+.status p + p { margin-top: .7em; }
+footer { padding-block: 56px 48px; margin-top: 64px; border-top: 2px solid var(--ink); }
+footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 18px; font: 400 .74rem/1.6 var(--mono); color: var(--ink-2); }
+
+/* load sequence */
+@keyframes rise { from { transform: translateY(14px); opacity: .001; } to { transform: none; opacity: 1; } }
+.hero > * { animation: rise .7s cubic-bezier(.2,.7,.2,1) both; }
+.hero > *:nth-child(2) { animation-delay: .12s; }
+.hero > *:nth-child(3) { animation-delay: .24s; }
+@media (prefers-reduced-motion: reduce) { .hero > * { animation: none; } }
+
+@media (max-width: 900px) {
+  .thesis, .name, .start, .wire, .kin { grid-template-columns: minmax(0, 1fr); }
+  .censors { grid-template-columns: minmax(0, 1fr); }
+  .bench { grid-template-columns: minmax(0, 1fr); }
+  .tabs { position: static; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+  .tab { border-left: 0; border-bottom: 3px solid var(--rule); }
+  .tab:hover { border-left: 0; }
+  .tab[aria-selected="true"] { border-left: 0; border-bottom-color: var(--magenta); }
+  .leg { grid-template-columns: 54px minmax(0, 1fr); }
+  .leg pre { grid-column: 2; }
+  .crypto { grid-template-columns: minmax(0, 1fr); }
+  .crypto div + div { padding-left: 0; border-left: 0; border-top: 1px solid var(--rule); }
+}
+@media (max-width: 640px) {
+  body { font-size: 16px; }
+  .figures { grid-template-columns: minmax(0, 1fr); }
+  .fig + .fig { padding-left: 0; border-left: 0; border-top: 1px solid var(--rule); }
+  .principles { grid-template-columns: minmax(0, 1fr); }
+  .principle, .principle:nth-child(even) { padding: 24px 0; border-left: 0; }
+  .row, .rowhead { grid-template-columns: 104px minmax(0, 1fr) 54px; gap: 10px; }
+  .row .who small { display: none; }
+  .nav { display: none; }
+  .status { grid-template-columns: minmax(0, 1fr); }
+  .status .tagline { writing-mode: horizontal-tb; transform: none; }
+  .hero h1 small { padding-bottom: .3em; margin-left: 0; }
+}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header class="bar">
+    <a class="mark" href="#top" aria-label="Soar home">
+      <svg viewBox="0 0 26 26" aria-hidden="true"><circle cx="13" cy="13" r="11" fill="none" stroke="currentColor" stroke-width="2"/><path d="M5 17 L13 6 L21 17" fill="none" stroke="var(--magenta)" stroke-width="2.4" stroke-linejoin="round"/></svg>
+      Soar
+    </a>
+    <nav class="nav" aria-label="Sections">
+      <a href="#how">How it works</a>
+      <a href="#censors">Censors</a>
+      <a href="#benchmarks">Benchmarks</a>
+      <a href="#wire">Wire format</a>
+      <a href="#start">Get started</a>
+      <a href="https://kindling.lantern.io">Kindling</a>
+      <a href="https://github.com/getlantern/soar">GitHub</a>
+    </nav>
+  </header>
+
+  <div class="hero" id="top">
+    <p class="byline">From the <a href="https://lantern.io">Lantern</a> team. Open source, Apache 2.0.</p>
+    <h1><span class="soa">Soa</span><span class="r">r</span><small><b>SOA</b>, start of authority: the first record in every DNS zone.</small></h1>
+    <div class="thesis">
+      <p class="big">A DNS tunnel for networks that block everything except DNS.</p>
+      <div>
+        <p class="lede">Soar carries TCP connections through the recursive resolvers a censor can't afford to switch off: the ISP's, public ones, and in-country ones it finds on its own. It uses all of them at once, shrugs off forged answers and blocked UDP, and connects in under a second.</p>
+        <div class="cta">
+          <a class="btn primary" href="#benchmarks">See the benchmarks</a>
+          <a class="btn" href="https://github.com/getlantern/soar">Source on GitHub</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="chart" aria-label="Animated chart: queries leave a phone inside a censored network, pass through several DNS resolvers, and reach Soar's authoritative server; answers return the same way. One resolver is dead, and traffic shifts to the others.">
+  <canvas id="sky"></canvas>
+  <div class="legend">
+    <span><i class="q"></i>query, data rides in the name</span>
+    <span><i class="a"></i>answer, authenticated by the server</span>
+    <span><i class="x"></i>dead or blocked resolver</span>
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="figures">
+    <div class="fig"><div class="n">187<em>KB/s</em></div><p>in a Russia-like network where UDP to public resolvers is intercepted. dnstt, VayDNS and slipstream can't connect at all there; the next best manages 14.</p></div>
+    <div class="fig"><div class="n">0.2–0.9<em>s</em></div><p>to connect across all nine test networks. MasterDnsVPN and CottenDNS take 2 to 49 seconds.</p></div>
+    <div class="fig"><div class="n">7<em>of 9</em></div><p>emulated networks where Soar has the highest throughput. With 10% loss each way slipstream-rust edges it 71 to 69, and with two dead resolvers VayDNS, handed a good one, leads 153 to 144.</p></div>
+  </div>
+
+  <section id="name" aria-labelledby="name-h">
+    <div class="name">
+      <div>
+        <div class="head"><span class="label">The name</span><h2 id="name-h">Every query ends at the authority</h2></div>
+        <p>Every DNS zone begins with an SOA record, its <em>start of authority</em>. Soar's server is the authoritative name server for a zone you delegate to it, so every query for a name in that zone eventually lands there, whichever resolver it passed through.</p>
+        <p>Censors can block an IP address, a TLS fingerprint, or a whole protocol. Blocking the resolvers that every phone, bank and government site depends on is much harder. Add an <em>r</em> to SOA and the authority soars over the wall, using the one service the censor has to leave running.</p>
+      </div>
+<pre class="zone" aria-label="Example zone file delegating a subdomain to a Soar server"><s>; parent zone, example.com</s>
+<u>$ORIGIN</u> example.com.
+@        IN  <b>SOA</b>  ns1.example.com. hostmaster.example.com. (
+                  2026101001 <s>; serial</s>
+                  7200       <s>; refresh</s>
+                  900        <s>; retry</s>
+                  1209600    <s>; expire</s>
+                  60 )       <s>; negative TTL</s>
+
+<s>; hand the tunnel zone to the Soar server</s>
+t        IN  <b>NS</b>   ns.t.example.com.
+ns.t     IN  A    203.0.113.53
+
+<s>; a query a phone sends, base32 under the zone</s>
+<s>; 4-byte header, sealed frames, 8-byte tag</s>
+<u>aeb3k7qp4xw2mfzr…d6ty.t.example.com.</u>  IN  <b>TXT</b></pre>
+    </div>
+  </section>
+
+  <section id="how" aria-labelledby="how-h">
+    <div class="head">
+      <span class="label">How it works</span>
+      <h2 id="how-h">The life of a request</h2>
+      <p class="lede">A Soar client opens TCP streams the way any app would. Underneath, each stream becomes a series of DNS queries and answers, spread across every resolver that works.</p>
+    </div>
+    <div class="flight">
+      <div class="leg">
+        <div><h3>Handshake</h3><p class="what">The client puts a fresh X25519 key in a query name. The server answers with its own key, a session ID, and an Ed25519 signature over both. Only the real server can sign, so a forged answer from the censor is ignored and the client keeps waiting for the genuine one.</p></div>
+<pre><b>query</b>   sid=0 (2) | client X25519 key (32)
+<u>answer</u>  server X25519 key (32) | sid (2)
+        | Ed25519 signature (64)</pre>
+      </div>
+      <div class="leg">
+        <div><h3>Spread across resolvers</h3><p class="what">Each resolver is a separate path with its own round-trip time, loss record, name-length and answer-size limits, and congestion window. Soar sends on all of them at once and keeps checking ones it hasn't verified yet. Working resolvers are found by discovery and vetted with the same signed handshake.</p></div>
+<pre><i style="font-style:normal;color:var(--fail)">example</i>
+path       rtt    loss  name  answer  cwnd
+isp-a      48ms   1%    253   1232    <b>24</b>
+isp-b      71ms   3%    101   512     <b>11</b>
+national   92ms   2%    253   900     <b>16</b>
+public-1   ––     <s style="text-decoration:none;color:var(--fail)">dead</s>   ––    ––      0</pre>
+      </div>
+      <div class="leg">
+        <div><h3>Data rides in the name</h3><p class="what">Upstream data is sealed into a base32 query name. The header is 4 bytes and the authentication tag 8, which matters on networks that drop names longer than about 101 characters and leave roughly 50 bytes of room per query. Every path starts at that safe length and probes up to the full 253.</p></div>
+<pre>sid (2) | protected pn (2)
+| seal( hold budget, answer size class
+|       | STREAM id=4 off=1180 len=37 … )
+| tag (8)</pre>
+      </div>
+      <div class="leg">
+        <div><h3>The server holds the line</h3><p class="what">When there is nothing to send back yet, the server holds the client's query open until data arrives or the client's hold budget runs out, then answers the oldest held query first. Downstream data leaves the moment it is ready instead of waiting for the next poll.</p></div>
+<pre>t=0ms    query #812 arrives, nothing to send: <b>hold</b>
+t=0ms    query #813 arrives: <b>hold</b>
+t=37ms   origin replies with 1.1 KB
+t=37ms   <u>answer #812</u> (oldest first), then #813</pre>
+      </div>
+      <div class="leg">
+        <div><h3>An answer is an acknowledgement</h3><p class="what">Only the server can produce an authenticated answer, so an answer proves its query arrived and upstream needs no ACK frames. Downstream, the client acknowledges packets and also reports which queries got no answer, so the server resends exactly what was lost instead of waiting out a timer.</p></div>
+<pre><b>query</b>  ACK 640–702,704–719  <b>LOST</b> 703
+<u>answer</u> STREAM id=4 off=88340 (resent 703's data,
+       re-cut to fit this resolver's answer size)</pre>
+      </div>
+      <div class="leg">
+        <div><h3>The tail goes twice</h3><p class="what">The last packet of a request or response is sent on two different paths. When one copy is lost, the transfer still finishes on time instead of stalling for a retransmission timeout.</p></div>
+<pre>pn 742  STREAM id=4 … FIN  → isp-a
+pn 742  STREAM id=4 … FIN  → national   <b>(dup)</b></pre>
+      </div>
+    </div>
+  </section>
+
+  <section id="design" aria-labelledby="design-h">
+    <div class="head">
+      <span class="label">Design</span>
+      <h2 id="design-h">Why it's fast where others stall</h2>
+      <p class="lede">Each existing DNS tunnel does one thing well. Soar was designed from scratch against all of them, in an emulator that models what censors and resolvers actually do.</p>
+    </div>
+    <div class="principles">
+      <div class="principle"><h3><svg viewBox="0 0 18 18" aria-hidden="true"><rect x="2" y="5" width="6" height="8" fill="var(--magenta)"/><rect x="10" y="5" width="6" height="8" fill="none" stroke="var(--magenta)" stroke-width="2"/></svg>Packets, not segments</h3><p>A session has one packet-number space, and stream data travels as byte ranges. A retransmission is re-cut to fit whichever resolver it goes out on, and several frames share each packet, so nothing is stuck waiting for a resolver with the right size limit.</p></div>
+      <div class="principle"><h3><svg viewBox="0 0 18 18" aria-hidden="true"><circle cx="3" cy="9" r="2.5" fill="var(--magenta)"/><circle cx="15" cy="3" r="2" fill="var(--blue)"/><circle cx="15" cy="9" r="2" fill="var(--blue)"/><circle cx="15" cy="15" r="2" fill="var(--blue)"/><path d="M5 9 L13 3 M5 9 H13 M5 9 L13 15" stroke="var(--ink-2)" stroke-width="1.2"/></svg>Every resolver at once</h3><p>dnstt and VayDNS use a single resolver. Soar spreads traffic over all of them, weighted by how each one is performing, and drops a dead one without the user noticing.</p></div>
+      <div class="principle"><h3><svg viewBox="0 0 18 18" aria-hidden="true"><path d="M1 13 L5 13 L5 9 L9 9 L9 5 L13 5 L13 2 L17 2" fill="none" stroke="var(--magenta)" stroke-width="2"/></svg>Loss read in runs</h3><p>Resolver rate limits drop queries in runs. Random loss on a healthy path is scattered. Soar shrinks a path's window only on runs of losses, so a lossy but healthy resolver stays fully used while an overloaded one gets backed off.</p></div>
+      <div class="principle"><h3><svg viewBox="0 0 18 18" aria-hidden="true"><rect x="1" y="6" width="16" height="6" fill="none" stroke="var(--blue)" stroke-width="2"/><path d="M6 3 V15" stroke="var(--magenta)" stroke-width="2"/></svg>Answer sizes measured, not assumed</h3><p>Some resolvers silently drop answers over 512 bytes once traffic picks up, with no truncation flag. Soar starts every path at 512 bytes and probes upward with paired canary queries, and falls back to AAAA answers where a resolver refuses TXT.</p></div>
+      <div class="principle"><h3><svg viewBox="0 0 18 18" aria-hidden="true"><path d="M2 9 H16 M12 5 L16 9 L12 13" fill="none" stroke="var(--magenta)" stroke-width="2"/></svg>Fast loss detection at both ends</h3><p>Per-path packet thresholds on the client and RFC 9002-style packet and time thresholds on the server. Error answers such as truncation or REFUSED count against a path only after a full deadline, so a forged error can't push traffic off a working resolver.</p></div>
+      <div class="principle"><h3><svg viewBox="0 0 18 18" aria-hidden="true"><path d="M3 15 V9 M9 15 V5 M15 15 V12" stroke="var(--blue)" stroke-width="3"/></svg>Built for phones</h3><p>Soar is a Go client library and server in one module, written for memory-constrained mobile clients, iOS network extensions included. An idle session goes quiet: it polls only while data is in flight, which saves battery and keeps a quiet resolver quiet.</p></div>
+    </div>
+  </section>
+
+  <section id="censors" aria-labelledby="censors-h">
+    <div class="head">
+      <span class="label">Restricted airspace</span>
+      <h2 id="censors-h">Built for Iran, Russia and China</h2>
+      <p class="lede">Each country breaks DNS in its own way. Soar handles each one directly, and the emulator reproduces each one so the fixes are measured.</p>
+    </div>
+    <div class="censors">
+      <article class="airspace">
+        <span class="id">R-IR · Iran</span>
+        <h3>A hostile mix</h3>
+        <dl>
+          <div><dt>The network</dt><dd>Resolvers that filter TXT, some that are dead, and others that are lossy, rate-limited and jittery, cap answer sizes, or drop names over 101 characters.</dd></div>
+          <div><dt>What Soar does</dt><dd>AAAA answers where TXT is refused, safe-length names by default, per-path answer sizes, and discovery of in-country resolvers from bundled lists.</dd></div>
+        </dl>
+        <div class="score"><b>105 KB/s</b><span>next best 43, CottenDNS,<br>after 17 s to connect</span></div>
+      </article>
+      <article class="airspace">
+        <span class="id">R-RU · Russia</span>
+        <h3>UDP/53 intercepted</h3>
+        <dl>
+          <div><dt>The network</dt><dd>UDP queries to public resolvers are intercepted, while TCP port 53 is left alone. The national resolver that UDP lands on is slow and rate-limited.</dd></div>
+          <div><dt>What Soar does</dt><dd>Runs paths over TCP/53 with RFC 7766 pipelining, many queries in flight on one connection, alongside whatever UDP paths still work.</dd></div>
+        </dl>
+        <div class="score"><b>187 KB/s</b><span>next best 14, CottenDNS, after 18 s;<br>dnstt, VayDNS, slipstream fail</span></div>
+      </article>
+      <article class="airspace">
+        <span class="id">R-CN · China</span>
+        <h3>Forged answers</h3>
+        <dl>
+          <div><dt>The network</dt><dd>Forged answers race the real ones on UDP/53, and domestic resolvers rate-limit each client address.</dd></div>
+          <div><dt>What Soar does</dt><dd>Forged answers can't authenticate, so they're dropped and the real answer still counts. Rate limits read as runs of loss, and the window backs off only on that path.</dd></div>
+        </dl>
+        <div class="score"><b>60 KB/s</b><span>next best 43, slipstream-rust;<br>VayDNS, MasterDnsVPN fail</span></div>
+      </article>
+    </div>
+  </section>
+
+  <section id="benchmarks" aria-labelledby="bench-h">
+    <div class="head">
+      <span class="label">Benchmarks</span>
+      <h2 id="bench-h">Eight tunnels, nine networks</h2>
+      <p class="lede">Every tunnel fetches 100 KB through the same emulated recursive resolvers. Pick a network to see throughput and time to connect.</p>
+    </div>
+    <div class="bench">
+      <div class="tabs" role="tablist" aria-label="Emulated network" id="tabs"></div>
+      <div class="panel" role="tabpanel" id="panel" aria-live="polite">
+        <div class="scen"><h3 id="scen-name"></h3><p id="scen-desc"></p><div class="imp" id="scen-imp"></div></div>
+        <div class="rowhead"><span>Tunnel</span><span>100 KB fetch, KB/s</span><span>Connect</span></div>
+        <div class="rows" id="rows"></div>
+      </div>
+    </div>
+    <div class="overview">
+      <table>
+        <thead><tr><th>Network</th><th>Soar</th><th>Best other</th><th>Soar vs best</th><th></th></tr></thead>
+        <tbody id="overview"></tbody>
+      </table>
+    </div>
+    <div class="method">
+      <p><strong>How these were measured.</strong> A purpose-built emulator puts real builds of each tunnel behind emulated recursive resolvers with delay, jitter, loss in each direction, per-resolver query rate limits, answer-size caps, long-name filtering, TXT filtering, dead resolvers, blocked UDP and forged-answer injection. Throughput is for a 100 KB fetch. dnstt and VayDNS use one resolver, so they're given the best one in each network. MasterDnsVPN runs its defaults (3× duplication) and CottenDNS runs both its speed and survival presets.</p>
+      <p>These are emulator results. Field measurements from inside Iran, Russia and China come next.</p>
+    </div>
+  </section>
+
+  <section id="wire" aria-labelledby="wire-h">
+    <div class="head">
+      <span class="label">Wire format</span>
+      <h2 id="wire-h">Twelve bytes of overhead upstream</h2>
+      <p class="lede">Upstream travels in the query name as lower-case base32. Downstream travels in TXT character-strings, or in numbered 15-byte AAAA chunks where TXT is filtered.</p>
+    </div>
+    <div class="wire">
+      <figure>
+        <figcaption>Upstream data packet, in the query name</figcaption>
+        <div class="packet">
+          <div><b>sid</b><span>2 B</span></div>
+          <div><b>pn</b><span>2 B, protected</span></div>
+          <div class="sealed"><b>hdr</b><span>hold · size class</span></div>
+          <div class="sealed" style="flex-grow:4"><b>frames</b><span>sealed</span></div>
+          <div class="tag"><b>tag</b><span>8 B</span></div>
+        </div>
+        <p class="note">The 1-byte header carries the client's hold budget in 100 ms steps and the answer size class it wants (512 + 48·k bytes).</p>
+      </figure>
+      <figure>
+        <figcaption>Downstream data packet, in the answer</figcaption>
+        <div class="packet">
+          <div><b>pn</b><span>2 B, protected</span></div>
+          <div class="sealed"><b>held</b><span>×10 ms</span></div>
+          <div class="sealed"><b>backlog</b><span>1 B</span></div>
+          <div class="sealed" style="flex-grow:4"><b>frames</b><span>sealed</span></div>
+          <div class="tag"><b>tag</b><span>8 B</span></div>
+        </div>
+        <p class="note">The server reports how long it held the query, so the client can separate resolver round trips from server wait, and how much data is still queued.</p>
+      </figure>
+    </div>
+    <div class="frames" aria-label="Frame types">
+      <span>PADDING</span><span>PING</span><span>ACK ranges</span><span>LOST</span><span>STREAM id · offset · len · FIN</span><span>MAX_STREAM_DATA</span><span>RESET_STREAM</span><span>CLOSE</span>
+    </div>
+    <div class="crypto">
+      <div><h3>Forward secret</h3><p>Every session starts with an ephemeral X25519 key exchange, so recorded traffic stays sealed even if the server's long-term key leaks later.</p></div>
+      <div><h3>Server authenticated</h3><p>The server signs the handshake transcript with Ed25519. Clients ship only its public key, so there is no shared secret for a censor to pull out of an app.</p></div>
+      <div><h3>Sealed per direction</h3><p>ChaCha20-Poly1305 with a separate key each way and the tag truncated to 8 bytes. Packet numbers are protected QUIC-style, so the wire carries no visible counters.</p></div>
+    </div>
+  </section>
+
+  <section id="kindling" aria-labelledby="kin-h">
+    <div class="kin">
+      <div>
+        <div class="head"><span class="label">Part of kindling</span><h2 id="kin-h">The last resort that still gets through</h2></div>
+        <p>Soar ships as a transport in <a href="https://kindling.lantern.io">kindling</a>, Lantern's open-source library for getting an app's first requests through a censored network. Kindling races domain fronting, proxyless dialing and AMP caching against each other and uses whichever connects first.</p>
+        <p>Soar sits in kindling's last-resort tier. It's dialed only when every faster transport has failed, which is exactly the network where nothing else works. Any Go app can use the same setup with one option, <code>kindling.WithDNSTunnel(client)</code>.</p>
+        <div class="cta"><a class="btn" href="https://kindling.lantern.io">Explore kindling</a></div>
+      </div>
+      <ol class="tiers" aria-label="Kindling race tiers">
+        <li><b>Tier 1 · raced in parallel</b><span>domain fronting · proxyless smart dialer · AMP cache · your own transports</span></li>
+        <li class="last"><b>Last resort · only if tier 1 fails</b><span>Soar DNS tunnel</span></li>
+      </ol>
+    </div>
+  </section>
+
+  <section id="start" aria-labelledby="start-h">
+    <div class="head">
+      <span class="label">Get started</span>
+      <h2 id="start-h">Run a server, ship a key</h2>
+      <p class="lede">Delegate a zone to a host with an NS record, generate a key pair, and point clients at it.</p>
+    </div>
+    <div class="start">
+      <figure class="term">
+        <div class="top"><span>Server</span><button type="button" data-copy="srv">Copy</button></div>
+<pre id="srv"><i># install</i>
+go install github.com/getlantern/soar/cmd/soar-server@latest
+
+<i># prints the private key (keep it) and the public key (ship it)</i>
+soar-server keygen
+
+<i># answer for the delegated zone</i>
+soar-server <b>-zone</b> t.example.com <b>-key-file</b> key <b>-listen</b> :53</pre>
+      </figure>
+      <figure class="term">
+        <div class="top"><span>Client, Go</span><button type="button" data-copy="cli">Copy</button></div>
+<pre id="cli">c, err := soar.NewClient(soar.Config{
+	Zone:      "t.example.com",
+	ServerKey: serverPublicKey,
+	Resolvers: []string{"192.0.2.1:53", "192.0.2.2:53"},
+	Discovery: soar.Discovery{Enabled: true, Country: "IR"},
+})
+conn, err := c.<b>DialContext</b>(ctx, "tcp", "example.com:443")</pre>
+      </figure>
+    </div>
+    <p class="start-note">The server dials destinations for anyone holding its public key, so by default it refuses private addresses, including its own, and allows only ports 80 and 443 (<code>-allow-ports</code> changes that). The client also plugs straight into <a href="https://github.com/getlantern/kindling">kindling</a> as its DNS-tunnel transport, which is how <a href="https://lantern.io">Lantern</a> uses it.</p>
+  </section>
+
+  <div class="status">
+    <span class="tagline">Pre-release</span>
+    <div>
+      <p>Soar is open source under the Apache 2.0 license and built by the <a href="https://lantern.io">Lantern</a> team, who make Lantern, a free app for getting past internet censorship. The protocol may still change and has no compatibility promise yet.</p>
+      <p>Its bundled Iran resolver and range lists come from KevinNet DNS (MIT). Issues and pull requests are welcome on <a href="https://github.com/getlantern/soar">GitHub</a>.</p>
+    </div>
+  </div>
+</div>
+
+<footer>
+  <div class="wrap">
+    <span>Soar · github.com/getlantern/soar · Apache 2.0</span>
+    <span><a href="https://kindling.lantern.io">kindling</a> · <a href="https://lantern.io">Lantern</a></span>
+    <span>A <a href="https://lantern.io">Lantern</a> project</span>
+  </div>
+</footer>
+
+<script>
+(() => {
+  // name, note, connect, KB/s (null = failed the 100 KB fetch), fails note
+  const C = ["Soar", "dnstt", "VayDNS", "slipstream-rust", "slipstream-c", "MasterDnsVPN", "CottenDNS speed", "CottenDNS survival"];
+  const NOTE = { "dnstt": "best single resolver", "VayDNS": "best single resolver", "slipstream-rust": "multipath QUIC, archived", "slipstream-c": "multipath QUIC", "MasterDnsVPN": "defaults, 3× duplication", "CottenDNS speed": "speed preset", "CottenDNS survival": "survival preset", "Soar": "all resolvers" };
+  const S = [
+    { id: "clean", name: "Clean", desc: "Three healthy resolvers, 30 ms away. The best case, and a check that robustness doesn't cost speed.",
+      imp: ["3 resolvers", "30 ms"],
+      r: [[453, 0.2], [117.5, 0.29], [295.1, 0.23], [261.9, 0.33], [263.4, 0.21], [237.1, 2.0], [33.5, 3.1], [61.0, 3.0]] },
+    { id: "realistic", name: "Realistic", desc: "Three resolvers with the delay, jitter, light loss and rate limits of an ordinary mobile network.",
+      imp: ["3 resolvers", "60 ± 40 ms", "2% loss each way", "100 queries/s"],
+      r: [[166, 0.5], [37.8, 0.56], [42.5, 0.54], [108.1, 0.51], [null, null, "100 KB fetch failed"], [53.3, 7.9], [44.6, 10.0], [31.7, 14.5]] },
+    { id: "lossy", name: "Lossy", desc: "Three resolvers losing one packet in ten in each direction.",
+      imp: ["3 resolvers", "60 ± 40 ms", "10% loss each way"],
+      r: [[69, 0.5], [51.0, 0.85], [26.5, 0.67], [71.2, 0.9], [null, null, "100 KB fetch failed"], [37.4, 33.1], [23.7, 18.7], [16.5, 45.0]] },
+    { id: "ratelimited", name: "Rate-limited", desc: "Three resolvers that each accept only 30 queries a second and drop the rest.",
+      imp: ["3 resolvers", "60 ± 20 ms", "30 queries/s each"],
+      r: [[112, 0.4], [14.1, 0.63], [20.8, 0.53, "2 of 3 fetches failed"], [63.4, 0.45], [95.4, 0.32, "some fetches failed"], [24.2, 3.8], [29.1, 6.3], [28.8, 6.5]] },
+    { id: "truncating", name: "Truncating", desc: "One of three resolvers caps answers at 512 bytes.",
+      imp: ["3 resolvers", "60 ± 20 ms", "one caps answers at 512 B"],
+      r: [[169, 0.4], [110.6, 0.48], [134.3, 0.45], [null, null, "can't connect"], [null, null, "can't connect"], [106.9, 4.0], [33.7, 6.3], [6.4, 6.7]] },
+    { id: "deadmix", name: "Dead resolvers", desc: "Five resolvers, two of them dead. Single-resolver tunnels are handed one of the good ones.",
+      imp: ["5 resolvers", "2 dead", "60 ± 30 ms", "3% loss each way"],
+      r: [[144, 0.75], [89.5, 0.48], [153.4, 0.51], [null, null, "can't connect"], [null, null, "can't connect"], [64.6, 12.2], [39.5, 12.7], [37.7, 40.7]] },
+    { id: "iranlike", name: "Iran-like", desc: "A hostile mix modeled on reports from Iran: a TXT-filtering resolver, a dead one, and lossy, rate-limited, high-jitter ones with answer-size and name-length limits.",
+      imp: ["5 resolvers", "TXT filtered", "1 dead", "40 queries/s", "names ≤ 101 chars", "answers ≤ 900 B", "3–8% loss"],
+      r: [[105, 0.7], [16.5, 0.89], [13.7, 1.1, "2 of 3 fetches failed"], [null, null, "can't connect"], [null, null, "can't connect"], [18.9, 22.8], [43.1, 17.1], [18.3, 42.4]] },
+    { id: "russialike", name: "Russia-like", desc: "UDP to public resolvers is intercepted while TCP/53 passes. The national resolver UDP lands on is slow and rate-limited.",
+      imp: ["3 resolvers", "UDP blocked on 2", "20 queries/s", "3% loss"],
+      r: [[187, 0.9], [null, null, "can't connect"], [null, null, "can't connect"], [null, null, "can't connect"], [null, null, "can't connect"], [8.5, 10.6], [14.0, 17.9], [5.7, 49.2]] },
+    { id: "chinalike", name: "China-like", desc: "Forged answers race the real ones on UDP/53, and domestic resolvers rate-limit each client.",
+      imp: ["3 resolvers", "forged answers", "20 queries/s each", "2% loss"],
+      r: [[60, 0.4], [8.0, 0.39], [null, null, "can't connect"], [43.3, 0.53], [42.8, 0.42], [null, null, "can't connect"], [18.1, 7.3], [13.3, 29.5]] },
+  ];
+  const fmtS = s => s == null ? "—" : (s < 1 ? (s * 1000).toFixed(0) + " ms" : s.toFixed(1) + " s");
+  const fmtK = v => v >= 100 ? v.toFixed(0) : v.toFixed(1).replace(/\.0$/, "");
+
+  const tabs = document.getElementById("tabs"), rows = document.getElementById("rows");
+  S.forEach((s, i) => {
+    const b = document.createElement("button");
+    b.className = "tab"; b.type = "button"; b.id = "tab-" + s.id; b.setAttribute("role", "tab");
+    b.setAttribute("aria-controls", "panel");
+    b.innerHTML = `<span>${s.name}</span><small>${fmtK(s.r[0][0])}</small>`;
+    b.addEventListener("click", () => show(i, true));
+    b.addEventListener("keydown", e => {
+      const d = e.key === "ArrowDown" || e.key === "ArrowRight" ? 1 : e.key === "ArrowUp" || e.key === "ArrowLeft" ? -1 : 0;
+      if (d) { e.preventDefault(); const n = (i + d + S.length) % S.length; show(n, true); tabs.children[n].focus(); }
+    });
+    tabs.appendChild(b);
+  });
+
+  C.forEach((name, j) => {
+    const row = document.createElement("div");
+    row.className = "row" + (j === 0 ? " soar" : "");
+    row.innerHTML = `<div class="who">${name}<small>${NOTE[name]}</small></div><div class="track"><div class="fill"></div><span class="val"></span></div><div class="conn"></div>`;
+    rows.appendChild(row);
+  });
+
+  function show(i, focus) {
+    const s = S[i];
+    [...tabs.children].forEach((t, k) => { t.setAttribute("aria-selected", k === i); t.tabIndex = k === i ? 0 : -1; });
+    document.getElementById("panel").setAttribute("aria-labelledby", "tab-" + s.id);
+    document.getElementById("scen-name").textContent = s.name;
+    document.getElementById("scen-desc").textContent = s.desc;
+    document.getElementById("scen-imp").innerHTML = s.imp.map(x => `<span>${x}</span>`).join("");
+    const max = Math.max(...s.r.map(r => r[0] || 0));
+    // Order by throughput, Soar's row first only when it leads; failures last.
+    const order = C.map((_, j) => j).sort((a, b) => (s.r[b][0] ?? -1) - (s.r[a][0] ?? -1));
+    order.forEach((j, pos) => {
+      const row = rows.children[j], [v, t, note] = s.r[j];
+      row.style.order = pos;
+      row.classList.toggle("failed", v == null);
+      const fill = row.querySelector(".fill"), val = row.querySelector(".val");
+      const pct = v == null ? 0 : (v / max) * 100;
+      fill.style.width = pct + "%";
+      if (v == null) { val.textContent = note; val.style.left = ""; }
+      else {
+        val.textContent = fmtK(v) + (note ? "  · " + note : "");
+        val.style.left = `calc(${pct}% + 8px)`;
+        if (pct > 70) { val.style.left = `calc(${pct}% - 8px)`; val.style.transform = "translate(-100%, -50%)"; val.style.color = "var(--paper)"; }
+        else { val.style.transform = ""; val.style.color = ""; }
+      }
+      row.querySelector(".conn").textContent = fmtS(t);
+    });
+    rows.style.display = "flex"; rows.style.flexDirection = "column";
+    try { localStorage.setItem("soar-scenario", s.id); } catch (e) {}
+  }
+
+  const ov = document.getElementById("overview");
+  S.forEach((s, i) => {
+    const soar = s.r[0][0];
+    let best = -1, bi = -1;
+    s.r.forEach((r, j) => { if (j && r[0] != null && r[0] > best) { best = r[0]; bi = j; } });
+    const ratio = soar / best, win = ratio >= 1;
+    const fails = s.r.map((r, j) => r[0] == null ? C[j] : null).filter(Boolean);
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td><a href="#benchmarks" data-i="${i}">${s.name}</a></td><td class="num soarv">${fmtK(soar)} KB/s</td>` +
+      `<td class="num">${fmtK(best)} KB/s · ${C[bi]}</td>` +
+      `<td class="x ${win ? "" : "lose"}">${win ? ratio.toFixed(ratio >= 10 ? 0 : 1) + "×" : (ratio).toFixed(2) + "×"}</td>` +
+      `<td class="other">${fails.length ? fails.length + " can't finish" : ""}</td>`;
+    ov.appendChild(tr);
+  });
+  ov.addEventListener("click", e => {
+    const a = e.target.closest("a[data-i]"); if (!a) return;
+    show(+a.dataset.i);
+  });
+
+  let start = 7;
+  try { const k = localStorage.getItem("soar-scenario"); const n = S.findIndex(s => s.id === k); if (n >= 0) start = n; } catch (e) {}
+  show(start);
+
+  document.querySelectorAll("[data-copy]").forEach(b => b.addEventListener("click", () => {
+    const pre = document.getElementById(b.dataset.copy);
+    const done = () => { b.textContent = "Copied"; setTimeout(() => b.textContent = "Copy", 1600); };
+    const select = () => { const r = document.createRange(); r.selectNodeContents(pre); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); b.textContent = "Selected"; setTimeout(() => b.textContent = "Copy", 1600); };
+    try { navigator.clipboard.writeText(pre.innerText).then(done, select); } catch (e) { select(); }
+  }));
+})();
+
+(() => {
+  // Hero chart: phone inside restricted airspace, resolvers as waypoints, Soar's authority on the right.
+  const cv = document.getElementById("sky"), ctx = cv.getContext("2d");
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)");
+  let W = 0, H = 0, dpr = 1, col = {}, nodes = null, pkts = [], lost = [], last = 0, spawn = 0, raf = 0;
+  const R = [ // resolver waypoints, fractions of the band; one dead
+    { x: .36, y: .2, name: "ISP-A", dead: false },
+    { x: .41, y: .44, name: "ISP-B", dead: false },
+    { x: .345, y: .7, name: "NATIONAL", dead: false },
+    { x: .47, y: .86, name: "PUBLIC-1", dead: true },
+    { x: .5, y: .14, name: "TCP/53", dead: false },
+  ];
+  function readColors() {
+    const cs = getComputedStyle(document.documentElement);
+    for (const k of ["paper", "paper-2", "ink", "ink-2", "rule", "magenta", "blue", "fail"]) col[k] = cs.getPropertyValue("--" + k).trim();
+  }
+  function size() {
+    const r = cv.getBoundingClientRect(); dpr = Math.min(devicePixelRatio || 1, 2);
+    W = r.width; H = r.height; cv.width = W * dpr; cv.height = H * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const narrow = W < 620;
+    nodes = {
+      phone: { x: W * (narrow ? .1 : .12), y: H * .5 },
+      res: R.map(r => ({ ...r, x: W * (narrow ? r.x * 1.05 : r.x), y: H * r.y })),
+      soa: { x: W * (narrow ? .88 : .86), y: H * .46 },
+    };
+  }
+  function label(t, x, y, c, align = "center", sz = 11) {
+    ctx.font = `600 ${sz}px "Saira Condensed", "Arial Narrow", sans-serif`;
+    ctx.fillStyle = c; ctx.textAlign = align; ctx.textBaseline = "middle";
+    ctx.letterSpacing = "1.5px"; ctx.fillText(t, x, y); ctx.letterSpacing = "0px";
+  }
+  function drawStatic() {
+    ctx.clearRect(0, 0, W, H);
+    // restricted airspace: hatched region with a blue boundary, like a chart's prohibited area
+    const bx = W * .53;
+    ctx.save();
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(bx - 30, 0);
+    ctx.bezierCurveTo(bx + 30, H * .3, bx - 50, H * .6, bx + 10, H); ctx.lineTo(0, H); ctx.closePath();
+    ctx.clip();
+    ctx.strokeStyle = col.blue; ctx.globalAlpha = .13; ctx.lineWidth = 1.2;
+    for (let i = -H; i < W; i += 11) { ctx.beginPath(); ctx.moveTo(i, H); ctx.lineTo(i + H, 0); ctx.stroke(); }
+    ctx.restore();
+    ctx.save(); ctx.strokeStyle = col.blue; ctx.lineWidth = 2.5; ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(bx - 30, 0); ctx.bezierCurveTo(bx + 30, H * .3, bx - 50, H * .6, bx + 10, H); ctx.stroke();
+    ctx.lineWidth = 7; ctx.globalAlpha = .18; ctx.stroke(); ctx.restore();
+    label("RESTRICTED · CENSORED NETWORK", 18, H - 18, col.blue, "left", 11);
+    label("OPEN INTERNET", W - 18, H - 18, col["ink-2"], "right", 11);
+
+    // routes
+    ctx.save(); ctx.setLineDash([3, 5]); ctx.lineWidth = 1;
+    for (const r of nodes.res) {
+      ctx.strokeStyle = r.dead ? col.fail : col["ink-2"]; ctx.globalAlpha = r.dead ? .35 : .45;
+      ctx.beginPath(); ctx.moveTo(nodes.phone.x, nodes.phone.y); ctx.lineTo(r.x, r.y); ctx.stroke();
+      if (!r.dead) { ctx.beginPath(); ctx.moveTo(r.x, r.y); ctx.lineTo(nodes.soa.x, nodes.soa.y); ctx.stroke(); }
+    }
+    ctx.restore();
+
+    // phone
+    const p = nodes.phone;
+    ctx.fillStyle = col.paper; ctx.strokeStyle = col.ink; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.roundRect(p.x - 11, p.y - 19, 22, 38, 4); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = col.ink; ctx.fillRect(p.x - 4, p.y + 12, 8, 2);
+    label("CLIENT", p.x, p.y + 34, col.ink);
+
+    // resolvers: VOR-style hexagon waypoints
+    for (const r of nodes.res) {
+      ctx.save(); ctx.translate(r.x, r.y);
+      ctx.strokeStyle = r.dead ? col.fail : col.blue; ctx.fillStyle = col["paper-2"]; ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (let k = 0; k < 6; k++) { const a = Math.PI / 3 * k; ctx.lineTo(Math.cos(a) * 10, Math.sin(a) * 10); }
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+      if (r.dead) { ctx.beginPath(); ctx.moveTo(-6, -6); ctx.lineTo(6, 6); ctx.moveTo(6, -6); ctx.lineTo(-6, 6); ctx.stroke(); }
+      else { ctx.fillStyle = col.blue; ctx.beginPath(); ctx.arc(0, 0, 2.5, 0, 7); ctx.fill(); }
+      ctx.restore();
+      label(r.name, r.x, r.y - 20, r.dead ? col.fail : col.blue, "center", 10);
+    }
+
+    // authority
+    const s = nodes.soa;
+    ctx.save(); ctx.translate(s.x, s.y);
+    ctx.strokeStyle = col.magenta; ctx.lineWidth = 2.5; ctx.fillStyle = col.paper;
+    ctx.beginPath(); ctx.arc(0, 0, 22, 0, 7); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.arc(0, 0, 30, 0, 7); ctx.globalAlpha = .35; ctx.stroke(); ctx.globalAlpha = 1;
+    ctx.beginPath(); ctx.moveTo(-10, 6); ctx.lineTo(0, -8); ctx.lineTo(10, 6); ctx.stroke();
+    ctx.restore();
+    label("SOA · t.example.com", s.x, s.y + 46, col.magenta, "center", 11);
+  }
+  function add() {
+    const live = nodes.res.filter(r => !r.dead);
+    // ~1 in 7 tries the dead resolver; it's lost and resent on a live one
+    const toDead = Math.random() < .14;
+    const via = toDead ? nodes.res.find(r => r.dead) : live[(Math.random() * live.length) | 0];
+    pkts.push({ via, t: 0, leg: 0, dead: toDead, speed: .55 + Math.random() * .35, hold: 0 });
+  }
+  const lerp = (a, b, t) => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+  function frame(ts) {
+    raf = requestAnimationFrame(frame);
+    const dt = Math.min(.05, (ts - last) / 1000 || 0); last = ts;
+    spawn -= dt; if (spawn <= 0) { add(); spawn = .16 + Math.random() * .22; }
+    drawStatic();
+    const out = [];
+    for (const k of pkts) {
+      if (k.hold > 0) { k.hold -= dt; }
+      else k.t += dt * k.speed * (k.leg % 2 ? 1.1 : 1.3);
+      // legs: 0 phone→res, 1 res→soa, 2 soa→res, 3 res→phone
+      if (k.t >= 1) {
+        k.t = 0; k.leg++;
+        if (k.dead && k.leg === 1) { // lost at the dead resolver: mark it, then resend on a live path
+          out.push({ via: k.via });
+          const live = nodes.res.filter(r => !r.dead);
+          k.via = live[(Math.random() * live.length) | 0]; k.dead = false; k.leg = 0; k.resent = true;
+        }
+        if (k.leg === 2) k.hold = Math.random() * .25; // the server holds the poll
+        if (k.leg > 3) { k.done = true; continue; }
+      }
+      const pts = [nodes.phone, k.via, nodes.soa, k.via, nodes.phone];
+      const a = pts[k.leg], b = pts[k.leg + 1], p = lerp(a, b, k.t);
+      const up = k.leg < 2;
+      ctx.fillStyle = up ? col.magenta : col.blue;
+      ctx.globalAlpha = 1;
+      ctx.beginPath(); ctx.arc(p.x, p.y, k.resent && up ? 4 : 3.2, 0, 7); ctx.fill();
+      if (k.resent && up) { ctx.strokeStyle = col.magenta; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(p.x, p.y, 7, 0, 7); ctx.stroke(); }
+      // trail
+      const q = lerp(a, b, Math.max(0, k.t - .06));
+      ctx.strokeStyle = up ? col.magenta : col.blue; ctx.globalAlpha = .35; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(q.x, q.y); ctx.lineTo(p.x, p.y); ctx.stroke(); ctx.globalAlpha = 1;
+    }
+    pkts = pkts.filter(k => !k.done);
+    out.forEach(o => lost.push({ r: o.via, t: 0 }));
+    for (const l of lost) { l.t += dt; const r = l.r; ctx.globalAlpha = Math.max(0, 1 - l.t / .9); ctx.strokeStyle = col.fail; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(r.x, r.y, 12 + l.t * 22, 0, 7); ctx.stroke(); ctx.globalAlpha = 1; }
+    lost = lost.filter(l => l.t < .9);
+  }
+  function still() {
+    drawStatic();
+    // a resting frame: a few packets placed along live routes
+    const live = nodes.res.filter(r => !r.dead);
+    [[0, 0, .6], [1, 1, .4], [2, 2, .5], [3, 3, .7], [0, 1, .8], [1, 2, .2]].forEach(([ri, leg, t]) => {
+      const v = live[ri % live.length], pts = [nodes.phone, v, nodes.soa, v, nodes.phone];
+      const p = lerp(pts[leg], pts[leg + 1], t);
+      ctx.fillStyle = leg < 2 ? col.magenta : col.blue; ctx.beginPath(); ctx.arc(p.x, p.y, 3.2, 0, 7); ctx.fill();
+    });
+  }
+  function run() {
+    cancelAnimationFrame(raf); readColors(); size();
+    if (reduce.matches) still(); else { still(); raf = requestAnimationFrame(t => { last = t; frame(t); }); }
+  }
+  const restyle = () => { readColors(); if (reduce.matches) still(); };
+  addEventListener("resize", () => { size(); if (reduce.matches) still(); });
+  reduce.addEventListener?.("change", run);
+  matchMedia("(prefers-color-scheme: dark)").addEventListener?.("change", restyle);
+  new MutationObserver(restyle).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+  document.addEventListener("visibilitychange", () => { if (document.hidden) cancelAnimationFrame(raf); else run(); });
+  (document.fonts?.ready || Promise.resolve()).then(run);
+  run();
+})();
+</script>
+</body>
+</html>

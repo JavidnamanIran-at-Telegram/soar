@@ -3,6 +3,9 @@
 **Soar is a DNS tunnel built to be the fastest and most reliable way through networks that censor
 everything except DNS.**
 
+Website: **[soar.lantern.io](https://soar.lantern.io)**, with how it works and benchmarks. Soar is the
+last-resort transport in [kindling](https://kindling.lantern.io), from the [Lantern](https://lantern.io) team.
+
 The name comes from the root of every DNS zone: the **SOA** record, *Start of Authority*. Each zone
 begins with one, and Soar's server is that authority for its zone, the place every query ends up.
 Add an **r** and the authority *soars*, up and over the censor through the resolvers it can't
