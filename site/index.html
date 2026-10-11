@@ -11,9 +11,7 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 26 26'%3E%3Ccircle cx='13' cy='13' r='11' fill='none' stroke='%2318222d' stroke-width='2'/%3E%3Cpath d='M5 17 L13 6 L21 17' fill='none' stroke='%23a8155f' stroke-width='2.4' stroke-linejoin='round'/%3E%3C/svg%3E">
 <title>Soar</title>
 <meta name="description" content="Soar is a DNS tunnel for networks that block everything except DNS. It uses every resolver at once, survives forged answers and blocked UDP, and connects in under a second.">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Saira+Condensed:wght@500;600;700;800&family=Literata:ital,opsz,wght@0,7..72,400;0,7..72,600;1,7..72,400&family=Martian+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="fonts.css">
 <style>
 /* Layout: an aeronautical chart. Paper ground, magenta and blue chart inks, the censored
    network drawn as restricted airspace; one wide column with full-bleed chart bands. */
@@ -25,7 +23,7 @@
   --rule: #c3ccc0;
   --magenta: #a8155f;
   --blue: #1d5aa0;
-  --fail: #8a939c;
+  --fail: #616a73;
   --code-bg: #f7f8f4;
   --display: "Saira Condensed", "Arial Narrow", "Roboto Condensed", sans-serif;
   --body: "Literata", Georgia, "Times New Roman", serif;
@@ -35,12 +33,12 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --paper: #0e151d; --paper-2: #141e29; --ink: #e2e8ee; --ink-2: #9aa8b6; --rule: #2a3846;
-    --magenta: #ff6fb5; --blue: #72aefc; --fail: #6b7783; --code-bg: #111a24; color-scheme: dark;
+    --magenta: #ff6fb5; --blue: #72aefc; --fail: #8592a0; --code-bg: #111a24; color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
   --paper: #0e151d; --paper-2: #141e29; --ink: #e2e8ee; --ink-2: #9aa8b6; --rule: #2a3846;
-  --magenta: #ff6fb5; --blue: #72aefc; --fail: #6b7783; --code-bg: #111a24; color-scheme: dark;
+  --magenta: #ff6fb5; --blue: #72aefc; --fail: #8592a0; --code-bg: #111a24; color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -374,8 +372,8 @@ footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; g
   </div>
 </div>
 
-<div class="chart" aria-label="Animated chart: queries leave a phone inside a censored network, pass through several DNS resolvers, and reach Soar's authoritative server; answers return the same way. One resolver is dead, and traffic shifts to the others.">
-  <canvas id="sky"></canvas>
+<div class="chart">
+  <canvas id="sky" role="img" aria-label="Animated chart: queries leave a phone inside a censored network, pass through several DNS resolvers, and reach Soar's authoritative server; answers return the same way. One resolver is dead, and traffic shifts to the others."></canvas>
   <div class="legend">
     <span><i class="q"></i>query, data rides in the name</span>
     <span><i class="a"></i>answer, authenticated by the server</span>
@@ -612,8 +610,11 @@ pn 742  STREAM id=4 … FIN  → national   <b>(dup)</b></pre>
 <pre id="srv"><i># install</i>
 go install github.com/getlantern/soar/cmd/soar-server@latest
 
-<i># prints the private key (keep it) and the public key (ship it)</i>
-soar-server keygen
+<i># save the private key to key (keep it secret)</i>
+(umask 077; soar-server keygen | awk '$1 == "private" { print $2 }' &gt; key)
+
+<i># print the public key to ship with clients</i>
+soar-server pubkey key
 
 <i># answer for the delegated zone</i>
 soar-server <b>-zone</b> t.example.com <b>-key-file</b> key <b>-listen</b> :53</pre>
