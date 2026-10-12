@@ -50,6 +50,8 @@ for i in 2 3 4 5 6; do sudo ifconfig lo0 alias 127.0.0.$i; done
 - **CottenDNS** runs its `speed` and `survival` presets with `MIN_DOWNLOAD_MTU=200` and
   `DATA_ENCRYPTION_METHOD=3`.
 - Everything else uses each project's shipped configuration. The harness overrides only the zone,
-  the listen and forward addresses, and the key.
+  the listen and forward addresses, and the key. MasterDnsVPN and CottenDNS also get
+  `PROTOCOL_TYPE = "TCP"`, which forwards plain TCP to the origin instead of running a SOCKS5
+  proxy. It changes the local proxy mode, not how the tunnel uses DNS.
 
 If a setting here is unfair to a tunnel, please open an issue or a PR.
