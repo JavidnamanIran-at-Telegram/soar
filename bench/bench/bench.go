@@ -80,7 +80,11 @@ func Run(ctx context.Context, c Contender, sc Scenario, trials int, timeout time
 		res.ColdErr = err.Error()
 		return res
 	}
-	dir, _ := os.MkdirTemp("", "dnsbench-"+c.Name()+"-")
+	dir, err := os.MkdirTemp("", "dnsbench-"+c.Name()+"-")
+	if err != nil {
+		res.ColdErr = err.Error()
+		return res
+	}
 	defer os.RemoveAll(dir)
 	env := &Env{Zone: "t.bench.test", ServerAddr: server, Origin: origin, WorkDir: dir, Log: logw}
 	if err := c.StartServer(ctx, env); err != nil {
@@ -101,13 +105,8 @@ func Run(ctx context.Context, c Contender, sc Scenario, trials int, timeout time
 		}
 		resolvers = append(resolvers, r)
 		env.Resolvers = append(env.Resolvers, r.Addr)
-		if env.BestResolver == "" && !imp.Dead && !imp.FilterTXT && imp.MaxQName == 0 && imp.MaxAnswer == 0 {
-			env.BestResolver = r.Addr
-		}
 	}
-	if env.BestResolver == "" {
-		env.BestResolver = env.Resolvers[0]
-	}
+	env.BestResolver = env.Resolvers[BestResolver(sc.Resolvers)]
 
 	start := time.Now()
 	dial, err := c.StartClient(ctx, env)
@@ -143,6 +142,17 @@ func Run(ctx context.Context, c Contender, sc Scenario, trials int, timeout time
 		res.Queries += r.Stats.Queries.Load()
 	}
 	return res
+}
+
+// BestResolver is the index of the first resolver a single-resolver UDP client could use without
+// impairments that break tunnels outright, or 0 if there is none.
+func BestResolver(imps []emu.Impairment) int {
+	for i, imp := range imps {
+		if !imp.Dead && !imp.BlockUDP && !imp.FilterTXT && imp.MaxQName == 0 && imp.MaxAnswer == 0 {
+			return i
+		}
+	}
+	return 0
 }
 
 func fetch(ctx context.Context, dial Dialer, n int, timeout time.Duration) error {

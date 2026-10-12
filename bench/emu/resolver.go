@@ -74,6 +74,7 @@ type Resolver struct {
 	mu        sync.Mutex
 	pending   map[uint16]pendingQuery
 	nextID    uint16
+	nextSeq   uint64
 	tokens    float64
 	largeSeen int64
 	last      time.Time
@@ -84,6 +85,8 @@ type pendingQuery struct {
 	reply func([]byte) // delivers a response to the client
 	id    uint16
 	at    time.Time
+	seq   uint64 // tells this query apart from a later one that reuses its wrapped ID
+	tcp   bool   // came over TCP, so UDP size limits don't apply
 	edns  int    // the client's advertised EDNS payload size (512 without OPT)
 	msg   []byte // the upstream query, for retransmission
 }
@@ -228,7 +231,9 @@ func (r *Resolver) handle(msg []byte, reply func([]byte), tcp bool) {
 		id := r.nextID
 		orig := binary.BigEndian.Uint16(msg)
 		binary.BigEndian.PutUint16(msg, id)
-		r.pending[id] = pendingQuery{reply: reply, id: orig, at: time.Now(), edns: edns, msg: msg}
+		r.nextSeq++
+		seq := r.nextSeq
+		r.pending[id] = pendingQuery{reply: reply, id: orig, seq: seq, tcp: tcp, at: time.Now(), edns: edns, msg: msg}
 		if len(r.pending) > 8192 {
 			for k, v := range r.pending {
 				if time.Since(v.at) > 10*time.Second {
@@ -239,7 +244,7 @@ func (r *Resolver) handle(msg []byte, reply func([]byte), tcp bool) {
 		r.mu.Unlock()
 		r.Stats.Forwarded.Add(1)
 		r.sendLater(r.upstream, msg, r.server)
-		r.armTimeout(id)
+		r.armTimeout(id, seq)
 	}
 }
 
@@ -253,7 +258,7 @@ func forged(q []byte) []byte {
 
 // armTimeout retransmits an unanswered query once at half the upstream timeout, then gives up
 // with SERVFAIL, as recursive resolvers do.
-func (r *Resolver) armTimeout(id uint16) {
+func (r *Resolver) armTimeout(id uint16, seq uint64) {
 	to := r.imp.UpstreamTimeout
 	if to <= 0 {
 		to = 2 * time.Second
@@ -262,7 +267,7 @@ func (r *Resolver) armTimeout(id uint16) {
 		r.mu.Lock()
 		pq, ok := r.pending[id]
 		r.mu.Unlock()
-		if ok {
+		if ok && pq.seq == seq {
 			r.Stats.Forwarded.Add(1)
 			r.upstream.WriteTo(pq.msg, r.server)
 		}
@@ -270,7 +275,10 @@ func (r *Resolver) armTimeout(id uint16) {
 	time.AfterFunc(to, func() {
 		r.mu.Lock()
 		pq, ok := r.pending[id]
-		delete(r.pending, id)
+		ok = ok && pq.seq == seq
+		if ok {
+			delete(r.pending, id)
+		}
 		r.mu.Unlock()
 		if ok {
 			resp := rcode(pq.msg, 2)
@@ -300,7 +308,7 @@ func (r *Resolver) fromServer() {
 		}
 		r.Stats.Answers.Add(1)
 		binary.BigEndian.PutUint16(msg, pq.id)
-		large := len(msg) > 512
+		large := !pq.tcp && len(msg) > 512 // policing targets UDP amplification
 		r.mu.Lock()
 		if large {
 			r.largeSeen++
@@ -315,7 +323,7 @@ func (r *Resolver) fromServer() {
 		if r.imp.MaxAnswer > 0 {
 			limit = min(limit, r.imp.MaxAnswer)
 		}
-		if len(msg) > limit {
+		if !pq.tcp && len(msg) > limit {
 			if r.imp.DropOversize {
 				r.Stats.Dropped.Add(1)
 				continue

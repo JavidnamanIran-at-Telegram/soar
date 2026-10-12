@@ -43,7 +43,11 @@ func main() {
 	}
 	want := func(list, name string) bool { return list == "" || slices.Contains(strings.Split(list, ","), name) }
 
-	logDir, _ := os.MkdirTemp("", "dnsbench-logs-")
+	logDir, err := os.MkdirTemp("", "dnsbench-logs-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "create log dir:", err)
+		os.Exit(1)
+	}
 	fmt.Fprintf(os.Stderr, "subprocess logs: %s\n", logDir)
 	var results []bench.Result
 	for _, sc := range bench.Scenarios {

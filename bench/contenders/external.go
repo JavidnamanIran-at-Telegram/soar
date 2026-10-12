@@ -19,7 +19,11 @@ func start(ctx context.Context, env *bench.Env, dir, bin string, args ...string)
 	cmd.Dir = dir
 	cmd.Stdout, cmd.Stderr = env.Log, env.Log
 	fmt.Fprintf(env.Log, "+ %s %s\n", bin, strings.Join(args, " "))
-	return cmd.Start()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go cmd.Wait() // reap it once the run's context kills it
+	return nil
 }
 
 func freeTCP() string {
