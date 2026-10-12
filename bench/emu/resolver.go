@@ -19,8 +19,9 @@ type Impairment struct {
 	Delay time.Duration
 	// Jitter adds up to this much random extra delay per packet (so packets reorder).
 	Jitter time.Duration
-	// LossUp and LossDown drop queries and answers on the path between the client and the
-	// resolver, so the resolver never sees a lost query and never retries it.
+	// LossUp and LossDown drop UDP queries and answers on the path between the client and the
+	// resolver, so the resolver never sees a lost query and never retries it. TCP recovers its own
+	// losses, so they don't apply to it.
 	LossUp, LossDown float64
 	// QPS rate-limits queries forwarded for the client; excess queries are dropped silently, as
 	// public resolvers do. 0 means no limit.
@@ -211,7 +212,7 @@ func (r *Resolver) fromClients() {
 // handle applies the impairments to a client query and forwards it.
 func (r *Resolver) handle(msg []byte, reply func([]byte), tcp bool) {
 	{
-		if len(msg) < 12 || r.imp.Dead || r.chance(r.imp.LossUp) || !r.allow() {
+		if len(msg) < 12 || r.imp.Dead || !tcp && r.chance(r.imp.LossUp) || !r.allow() {
 			r.Stats.Dropped.Add(1)
 			return
 		}
@@ -316,7 +317,7 @@ func (r *Resolver) fromServer() {
 		}
 		policed := large && r.largeSeen > int64(r.imp.DropLargeAfter)
 		r.mu.Unlock()
-		if r.imp.Dead || r.chance(r.imp.LossDown) || policed && r.chance(r.imp.DropLarge) {
+		if r.imp.Dead || !pq.tcp && r.chance(r.imp.LossDown) || policed && r.chance(r.imp.DropLarge) {
 			r.Stats.Dropped.Add(1)
 			continue
 		}
