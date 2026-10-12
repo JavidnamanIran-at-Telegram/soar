@@ -111,7 +111,7 @@ conn, err := c.DialContext(ctx, "tcp", "example.com:443")
 
 ## Benchmarks
 
-Measured with `dnsbench`, which runs each tunnel through emulated recursive resolvers with
+Measured with [`dnsbench`](bench/), which runs each tunnel through emulated recursive resolvers with
 realistic impairments (delay, jitter, loss, rate limits, truncation, dead resolvers, long-name
 filtering, TXT filtering, UDP blocking, answer injection). 100 KB fetch throughput, KB/s:
 
