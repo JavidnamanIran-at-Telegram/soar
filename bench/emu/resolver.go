@@ -19,7 +19,8 @@ type Impairment struct {
 	Delay time.Duration
 	// Jitter adds up to this much random extra delay per packet (so packets reorder).
 	Jitter time.Duration
-	// LossUp and LossDown drop queries (toward the server) and answers (toward the client).
+	// LossUp and LossDown drop queries and answers on the path between the client and the
+	// resolver, so the resolver never sees a lost query and never retries it.
 	LossUp, LossDown float64
 	// QPS rate-limits queries forwarded for the client; excess queries are dropped silently, as
 	// public resolvers do. 0 means no limit.
@@ -269,7 +270,7 @@ func (r *Resolver) armTimeout(id uint16, seq uint64) {
 		r.mu.Unlock()
 		if ok && pq.seq == seq {
 			r.Stats.Forwarded.Add(1)
-			r.upstream.WriteTo(pq.msg, r.server)
+			r.sendLater(r.upstream, pq.msg, r.server)
 		}
 	})
 	time.AfterFunc(to, func() {

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Clones and builds the other DNS tunnels dnsbench compares against, at the commits behind the
-# README numbers, into DIR (default ./others). Needs git, Go, Rust (cargo), meson, ninja and a C
-# toolchain.
+# README numbers, into DIR (default ./others). Needs git, Go, Rust (cargo), meson, ninja, CMake,
+# pkg-config, a C toolchain, and OpenSSL development headers and libraries.
 set -euo pipefail
 
 DIR=${1:-others}
