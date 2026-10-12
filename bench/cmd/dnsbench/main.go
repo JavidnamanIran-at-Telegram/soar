@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -22,9 +23,14 @@ func main() {
 	others := flag.String("others", os.Getenv("DNSBENCH_OTHERS"), "directory built by build-contenders.sh (default: soar only)")
 	flag.Parse()
 
-	R := *others
 	all := []bench.Contender{&contenders.Soar{}}
-	if R != "" {
+	if *others != "" {
+		// Contenders run with a scratch working directory, so their paths must be absolute.
+		R, err := filepath.Abs(*others)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "others dir:", err)
+			os.Exit(1)
+		}
 		all = append(all,
 			&contenders.Dnstt{Server: R + "/bin/dnstt-server", Client: R + "/bin/dnstt-client"},
 			&contenders.VayDNS{Server: R + "/bin/vaydns-server", Client: R + "/bin/vaydns-client"},
