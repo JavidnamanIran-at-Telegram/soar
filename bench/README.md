@@ -31,7 +31,8 @@ go run ./cmd/dnsbench -others others
 ```
 
 Use `-scenarios clean,lossy` and `-contenders soar,vaydns` to run a subset, and `-trials` to set the
-number of fetches per size (default 5). Each contender's server and client logs go to a temporary
+number of fetches per size (default 5). The published figures are medians of three separate runs
+with the defaults, since a single run varies by about 15%. Each contender's server and client logs go to a temporary
 directory, printed at start.
 
 On macOS, add loopback aliases so each resolver gets its own IP. Without them, all resolvers
