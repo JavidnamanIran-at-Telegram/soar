@@ -418,19 +418,28 @@ The server answers a data query **at once** if any of these holds:
 
 - its `hold_class` is 0;
 - its packet carried any frame other than ACK, LOST, PING and PADDING;
-- the server has data or control frames waiting to send;
 - the session is closed.
 
-Otherwise the server **holds** the query, up to `min(100 ms × hold_class, server cap)`, and answers
-it when data becomes available or the hold time runs out. When several queries are held, it answers
-the oldest first. Holding gives the client a way to receive downstream data as soon as it exists:
-the client keeps some polls held at the server, and any data the server produces leaves at once.
+Otherwise the server **holds** the query, up to `min(100 ms × hold_class, server cap)`. It answers
+held queries **oldest first**, whenever it has data or control frames to send. That happens at once
+if it already has some, including data that the new query's own frames made pending (a LOST frame
+re-queues lost data). An unanswered held query is answered when its hold time runs out.
+
+Holding gives the client a way to receive downstream data as soon as it exists: the client keeps
+some polls held at the server, and any data the server produces leaves at once.
+
+Releasing polls in arrival order is part of the contract, not an optimization. The client relies on
+it to tell a lost poll from a held one (§7.3). If a newer poll were answered while an older one is
+held, the client would conclude the older one was lost.
+
 The reference server holds at most 128 queries per session; past that it answers the oldest.
 
 ### 7.3 Acknowledgement and loss
 
 - **Upstream** loss is detected by the client: a query that doesn't get an authenticated answer
-  in time is lost. The client retransmits that packet's content in new packets. It also reports the
+  in time is lost. Data queries are answered at once, so a data query overtaken by later answered
+  queries is lost. A poll may legitimately be held, so a poll is judged lost early only when a
+  *later poll* has been answered, which §7.2's release order makes conclusive. The client retransmits that packet's content in new packets. It also reports the
   packet number in a LOST frame, because the query might have reached the server and only the answer
   got lost.
 - When the server receives LOST for an upstream packet:
