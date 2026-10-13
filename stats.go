@@ -14,14 +14,16 @@ type PathStat struct {
 	Loss        float64       `json:"loss"` // fraction lost over the recent outcome window
 	Inflight    int           `json:"inflight"`
 	Window      float64       `json:"window"`
-	NameLen     int           `json:"name_len"`   // current query-name cap
-	AnswerBytes int           `json:"answer_max"` // largest answer size shown to arrive; 0 until verified
+	NameLen     int           `json:"name_len"`     // current query-name cap
+	AnswerLimit int           `json:"answer_limit"` // answer size cap sizing has accepted for this path; 0 until verified
 	RecordType  string        `json:"record_type"`
 	Successes   int           `json:"successes"`
 	LastSuccess time.Time     `json:"last_success,omitzero"`
 }
 
-// PathStats returns a snapshot of every path, in configuration order.
+// PathStats returns a snapshot of every path, in the order paths were added: configured
+// resolvers first, then paths added later (TCP siblings under TCP "auto", and discovered
+// resolvers).
 func (c *Client) PathStats() []PathStat {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -49,7 +51,7 @@ func (c *Client) PathStats() []PathStat {
 			s.RTT = p.srtt
 		}
 		if p.verified {
-			s.AnswerBytes = 512 + 48*p.sizeOK
+			s.AnswerLimit = 512 + 48*p.sizeOK
 		}
 		if p.qtype == typeAAAA {
 			s.RecordType = "AAAA"
