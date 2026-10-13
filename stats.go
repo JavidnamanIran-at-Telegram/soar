@@ -5,11 +5,10 @@ import "time"
 // PathStat is a snapshot of one resolver path, for diagnostics: which
 // resolvers carry the tunnel on the user's network, and how well.
 type PathStat struct {
-	Resolver    string        `json:"resolver"`  // host:port of the recursive resolver
-	Transport   string        `json:"transport"` // "udp" or "tcp" (TCP/53, or what Config.DialTCP makes of it)
-	Verified    bool          `json:"verified"`  // has carried at least one authenticated answer
-	Suspended   bool          `json:"suspended"` // backed off after a run of losses
-	Dead        bool          `json:"dead"`
+	Resolver    string        `json:"resolver"`            // host:port of the recursive resolver
+	Transport   string        `json:"transport"`           // "udp" or "tcp" (TCP/53, or what Config.DialTCP makes of it)
+	Verified    bool          `json:"verified"`            // has carried at least one authenticated answer
+	Suspended   bool          `json:"suspended"`           // backed off after a run of losses
 	Candidate   bool          `json:"candidate,omitempty"` // added by discovery
 	RTT         time.Duration `json:"rtt"`
 	Loss        float64       `json:"loss"` // fraction lost over the recent outcome window
@@ -34,7 +33,6 @@ func (c *Client) PathStats() []PathStat {
 			Transport:   "udp",
 			Verified:    p.verified,
 			Suspended:   p.suspended.After(now),
-			Dead:        p.dead,
 			Candidate:   p.candidate,
 			Loss:        p.lossRate(),
 			Inflight:    p.inflight,
@@ -64,12 +62,12 @@ func (c *Client) Established() bool {
 	c.mu.Lock()
 	cs := c.sess
 	c.mu.Unlock()
-	if cs == nil || cs.isClosed() {
+	if cs == nil {
 		return false
 	}
 	select {
 	case <-cs.ready:
-		return cs.session != nil
+		return cs.session != nil && !cs.isClosed()
 	default:
 		return false
 	}

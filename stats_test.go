@@ -3,6 +3,7 @@ package soar
 import (
 	"crypto/ed25519"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -63,5 +64,29 @@ func TestStreamOnlyGetsTCPPathOnly(t *testing.T) {
 	want := "127.0.0.1:1/udp 127.0.0.1:1/tcp 127.0.0.1:853/tcp"
 	if g := strings.Join(got, " "); g != want {
 		t.Fatalf("paths %q, want %q", g, want)
+	}
+}
+
+func TestEstablishedDuringHandshake(t *testing.T) {
+	srv, pub := startServer(t)
+	origin := startOrigin(t)
+	c, err := NewClient(Config{Zone: testZone, ServerKey: pub, Resolvers: []string{srv}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	var stop atomic.Bool
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for !stop.Load() {
+			c.Established()
+		}
+	}()
+	fetch(t, c, origin, 10)
+	stop.Store(true)
+	<-done
+	if !c.Established() {
+		t.Fatal("not established after a fetch")
 	}
 }
