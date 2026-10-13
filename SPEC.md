@@ -439,9 +439,9 @@ The reference server holds at most 128 queries per session; past that it answers
 - **Upstream** loss is detected by the client: a query that doesn't get an authenticated answer
   in time is lost. Data queries are answered at once, so a data query overtaken by later answered
   queries is lost. A poll may legitimately be held, so a poll is judged lost early only when a
-  *later poll* has been answered, which §7.2's release order makes conclusive. The client retransmits that packet's content in new packets. It also reports the
-  packet number in a LOST frame, because the query might have reached the server and only the answer
-  got lost.
+  *later poll* has been answered, which §7.2's release order makes conclusive. The client
+  retransmits a lost packet's content in new packets. It also reports the packet number in a LOST
+  frame, because the query might have reached the server and only the answer got lost.
 - When the server receives LOST for an upstream packet:
   - If it already answered that packet, it treats the downstream packet in the answer as lost and
     retransmits its content.
