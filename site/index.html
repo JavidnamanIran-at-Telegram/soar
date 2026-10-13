@@ -383,9 +383,9 @@ footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; g
 
 <div class="wrap">
   <div class="figures">
-    <div class="fig"><div class="n">187<em>KB/s</em></div><p>in a Russia-like network where UDP to public resolvers is intercepted. dnstt, VayDNS and slipstream can't connect at all there; the next best manages 14.</p></div>
-    <div class="fig"><div class="n">0.2–0.9<em>s</em></div><p>to connect across all nine test networks. MasterDnsVPN and CottenDNS take 2 to 49 seconds.</p></div>
-    <div class="fig"><div class="n">7<em>of 9</em></div><p>emulated networks where Soar has the highest throughput. With 10% loss each way slipstream-rust edges it 71 to 69, and with two dead resolvers VayDNS, handed a good one, leads 153 to 144.</p></div>
+    <div class="fig"><div class="n">130<em>KB/s</em></div><p>in a Russia-like network where UDP to public resolvers is intercepted. slipstream can't connect there, and no other tunnel manages more than 13.</p></div>
+    <div class="fig"><div class="n">0.3–1.4<em>s</em></div><p>to connect across all nine test networks. MasterDnsVPN and CottenDNS take up to 46 seconds.</p></div>
+    <div class="fig"><div class="n">7<em>of 9</em></div><p>emulated networks where Soar has the highest throughput. Behind a truncating resolver VayDNS ties it at 168, and in the China-like network CottenDNS's speed preset leads 74 to 49.</p></div>
   </div>
 
   <section id="name" aria-labelledby="name-h">
@@ -494,7 +494,7 @@ pn 742  STREAM id=4 … FIN  → national   <b>(dup)</b></pre>
           <div><dt>The network</dt><dd>Resolvers that filter TXT, some that are dead, and others that are lossy, rate-limited and jittery, cap answer sizes, or drop names over 101 characters.</dd></div>
           <div><dt>What Soar does</dt><dd>AAAA answers where TXT is refused, safe-length names by default, per-path answer sizes, and discovery of in-country resolvers from bundled lists.</dd></div>
         </dl>
-        <div class="score"><b>105 KB/s</b><span>next best 43, CottenDNS,<br>after 17 s to connect</span></div>
+        <div class="score"><b>69 KB/s</b><span>next best 31, CottenDNS,<br>after 21 s to connect</span></div>
       </article>
       <article class="airspace">
         <span class="id">R-RU · Russia</span>
@@ -503,7 +503,7 @@ pn 742  STREAM id=4 … FIN  → national   <b>(dup)</b></pre>
           <div><dt>The network</dt><dd>UDP queries to public resolvers are intercepted, while TCP port 53 is left alone. The national resolver that UDP lands on is slow and rate-limited.</dd></div>
           <div><dt>What Soar does</dt><dd>Runs paths over TCP/53 with RFC 7766 pipelining, many queries in flight on one connection, alongside whatever UDP paths still work.</dd></div>
         </dl>
-        <div class="score"><b>187 KB/s</b><span>next best 14, CottenDNS, after 18 s;<br>dnstt, VayDNS, slipstream fail</span></div>
+        <div class="score"><b>130 KB/s</b><span>next best 13, CottenDNS, after 13 s;<br>dnstt and VayDNS under 10, slipstream fails</span></div>
       </article>
       <article class="airspace">
         <span class="id">R-CN · China</span>
@@ -512,7 +512,7 @@ pn 742  STREAM id=4 … FIN  → national   <b>(dup)</b></pre>
           <div><dt>The network</dt><dd>Forged answers race the real ones on UDP/53, and domestic resolvers rate-limit each client address.</dd></div>
           <div><dt>What Soar does</dt><dd>Forged answers can't authenticate, so they're dropped and the real answer still counts. Rate limits read as runs of loss, and the window backs off only on that path.</dd></div>
         </dl>
-        <div class="score"><b>60 KB/s</b><span>next best 43, slipstream-rust;<br>VayDNS, MasterDnsVPN fail</span></div>
+        <div class="score"><b>49 KB/s</b><span>CottenDNS leads with 74;<br>VayDNS, MasterDnsVPN fail</span></div>
       </article>
     </div>
   </section>
@@ -538,7 +538,7 @@ pn 742  STREAM id=4 … FIN  → national   <b>(dup)</b></pre>
       </table>
     </div>
     <div class="method">
-      <p><strong>How these were measured.</strong> A purpose-built emulator puts real builds of each tunnel behind emulated recursive resolvers with delay, jitter, loss in each direction, per-resolver query rate limits, answer-size caps, long-name filtering, TXT filtering, dead resolvers, blocked UDP and forged-answer injection. Throughput is for a 100 KB fetch. dnstt and VayDNS use one resolver, so they're given the best one in each network. MasterDnsVPN runs its defaults (3× duplication) and CottenDNS runs both its speed and survival presets.</p>
+      <p><strong>How these were measured.</strong> A purpose-built emulator puts real builds of each tunnel behind emulated recursive resolvers with delay, jitter, loss in each direction, per-resolver query rate limits, answer-size caps, long-name filtering, TXT filtering, dead resolvers, blocked UDP and forged-answer injection. Throughput is for a 100 KB fetch of incompressible data, the median of three runs; runs vary by about 15%. dnstt and VayDNS use one resolver, so they're given the best one in each network. MasterDnsVPN runs its defaults (3× duplication) and CottenDNS runs both its speed and survival presets.</p>
       <p>These are emulator results. Field measurements from inside Iran, Russia and China come next.</p>
     </div>
   </section>
@@ -658,31 +658,31 @@ conn, err := c.<b>DialContext</b>(ctx, "tcp", "example.com:443")</pre>
   const S = [
     { id: "clean", name: "Clean", desc: "Three healthy resolvers, 30 ms away. The best case, and a check that robustness doesn't cost speed.",
       imp: ["3 resolvers", "30 ms"],
-      r: [[453, 0.2], [117.5, 0.29], [295.1, 0.23], [261.9, 0.33], [263.4, 0.21], [237.1, 2.0], [33.5, 3.1], [61.0, 3.0]] },
+      r: [[476, 0.27], [126.2, 0.29], [432.6, 0.24], [224.6, 0.29], [242.5, 0.21], [231.5, 2.0], [32.5, 3.4], [61.6, 3.3]] },
     { id: "realistic", name: "Realistic", desc: "Three resolvers with the delay, jitter, light loss and rate limits of an ordinary mobile network.",
       imp: ["3 resolvers", "60 ± 40 ms", "2% loss each way", "100 queries/s"],
-      r: [[166, 0.5], [37.8, 0.56], [42.5, 0.54], [108.1, 0.51], [null, null, "100 KB fetch failed"], [53.3, 7.9], [44.6, 10.0], [31.7, 14.5]] },
+      r: [[124, 0.48], [41.4, 0.55], [40.7, 0.55], [91.1, 0.54], [null, null, "can't connect"], [61.1, 5.1], [50.8, 10.6], [30.4, 12.4]] },
     { id: "lossy", name: "Lossy", desc: "Three resolvers losing one packet in ten in each direction.",
       imp: ["3 resolvers", "60 ± 40 ms", "10% loss each way"],
-      r: [[69, 0.5], [51.0, 0.85], [26.5, 0.67], [71.2, 0.9], [null, null, "100 KB fetch failed"], [37.4, 33.1], [23.7, 18.7], [16.5, 45.0]] },
+      r: [[91, 1.4], [39.8, 0.58], [56.5, 0.91], [57.0, 0.93], [null, null, "can't connect"], [42.3, 13.7], [25.8, 23.6], [4.9, 46.3]] },
     { id: "ratelimited", name: "Rate-limited", desc: "Three resolvers that each accept only 30 queries a second and drop the rest.",
       imp: ["3 resolvers", "60 ± 20 ms", "30 queries/s each"],
-      r: [[112, 0.4], [14.1, 0.63], [20.8, 0.53, "2 of 3 fetches failed"], [63.4, 0.45], [95.4, 0.32, "some fetches failed"], [24.2, 3.8], [29.1, 6.3], [28.8, 6.5]] },
+      r: [[78, 0.43], [13.5, 0.49], [26.2, 0.47, "some fetches failed"], [62.9, 0.5], [62.6, 0.54], [26.2, 3.9], [31.5, 6.6], [25.2, 6.5]] },
     { id: "truncating", name: "Truncating", desc: "One of three resolvers caps answers at 512 bytes.",
       imp: ["3 resolvers", "60 ± 20 ms", "one caps answers at 512 B"],
-      r: [[169, 0.4], [110.6, 0.48], [134.3, 0.45], [null, null, "can't connect"], [null, null, "can't connect"], [106.9, 4.0], [33.7, 6.3], [6.4, 6.7]] },
+      r: [[168, 0.42], [135.7, 0.48], [168.6, 0.48], [null, null, "can't connect"], [null, null, "can't connect"], [101.7, 3.9], [31.6, 6.6], [6.5, 6.8]] },
     { id: "deadmix", name: "Dead resolvers", desc: "Five resolvers, two of them dead. Single-resolver tunnels are handed one of the good ones.",
       imp: ["5 resolvers", "2 dead", "60 ± 30 ms", "3% loss each way"],
-      r: [[144, 0.75], [89.5, 0.48], [153.4, 0.51], [null, null, "can't connect"], [null, null, "can't connect"], [64.6, 12.2], [39.5, 12.7], [37.7, 40.7]] },
+      r: [[136, 0.63], [73.7, 0.54], [92.3, 0.52], [null, null, "can't connect"], [null, null, "can't connect"], [66.0, 8.7], [30.0, 12.8], [38.9, 40.8]] },
     { id: "iranlike", name: "Iran-like", desc: "A hostile mix modeled on reports from Iran: a TXT-filtering resolver, a dead one, and lossy, rate-limited, high-jitter ones with answer-size and name-length limits.",
       imp: ["5 resolvers", "TXT filtered", "1 dead", "40 queries/s", "names ≤ 101 chars", "answers ≤ 900 B", "3–8% loss"],
-      r: [[105, 0.7], [16.5, 0.89], [13.7, 1.1, "2 of 3 fetches failed"], [null, null, "can't connect"], [null, null, "can't connect"], [18.9, 22.8], [43.1, 17.1], [18.3, 42.4]] },
+      r: [[69, 0.79], [16.0, 0.72], [12.7, 0.79, "some fetches failed"], [null, null, "can't connect"], [null, null, "can't connect"], [15.5, 13.3], [31.3, 21.2], [17.8, 41.4]] },
     { id: "russialike", name: "Russia-like", desc: "UDP to public resolvers is intercepted while TCP/53 passes. The national resolver UDP lands on is slow and rate-limited.",
       imp: ["3 resolvers", "UDP blocked on 2", "20 queries/s", "3% loss"],
-      r: [[187, 0.9], [null, null, "can't connect"], [null, null, "can't connect"], [null, null, "can't connect"], [null, null, "can't connect"], [8.5, 10.6], [14.0, 17.9], [5.7, 49.2]] },
+      r: [[130, 0.84], [9.4, 0.79], [9.1, 1.0, "some fetches failed"], [null, null, "can't connect"], [null, null, "can't connect"], [8.9, 9.2], [12.8, 13.3], [5.6, 41.7]] },
     { id: "chinalike", name: "China-like", desc: "Forged answers race the real ones on UDP/53, and domestic resolvers rate-limit each client.",
       imp: ["3 resolvers", "forged answers", "20 queries/s each", "2% loss"],
-      r: [[60, 0.4], [8.0, 0.39], [null, null, "can't connect"], [43.3, 0.53], [42.8, 0.42], [null, null, "can't connect"], [18.1, 7.3], [13.3, 29.5]] },
+      r: [[49, 1.1], [8.3, 0.41], [null, null, "can't connect"], [46.4, 0.44], [45.9, 0.49, "some fetches failed"], [null, null, "can't connect"], [74.3, 1.3], [52.8, 1.6]] },
   ];
   const fmtS = s => s == null ? "—" : (s < 1 ? (s * 1000).toFixed(0) + " ms" : s.toFixed(1) + " s");
   const fmtK = v => v >= 100 ? v.toFixed(0) : v.toFixed(1).replace(/\.0$/, "");
