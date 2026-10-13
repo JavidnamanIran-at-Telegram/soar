@@ -583,20 +583,20 @@ func exchangeVectors(t *testing.T, z zone) []obj {
 	step("a stream opened with a request, answered with OPENED and the response", qmsg, amsg,
 		obj{"up_pn": 0, "up_plaintext": hx(up0), "down_pn": 0, "down_plaintext": hx(down0)})
 
-	// 3. The client acknowledges downstream packet 0 and finishes its side; the server answers
-	// with its FIN after holding the poll for 120ms.
+	// 3. The client acknowledges downstream packet 0 and finishes its side. Its FIN is a STREAM
+	// frame, so the server answers at once (SPEC §7.2), with its own FIN.
 	up1 := append([]byte{0x50}, appendStream(appendAck(nil, rangeSet{{0, 1}}), 0, uint64(len(req)), nil, true, false)...)
 	q, qmsg = ask(0x0303, up.sealUp(vecSID, 1, up1))
 	if pn, plain, err := up.openUp(q.payload, dec(0, true)); err != nil || pn != 1 || !bytes.Equal(plain, up1) {
 		t.Fatal("exchange up 1", err)
 	}
-	down1 := append([]byte{12, 0}, appendStream(nil, 0, uint64(len(resp)), nil, true, false)...)
+	down1 := append([]byte{0, 0}, appendStream(nil, 0, uint64(len(resp)), nil, true, false)...)
 	amsg = appendAnswer(nil, q, rcodeOK, down.sealDown(1, 1, down1))
 	a, _ = parseAnswer(amsg)
 	if pn, plain, err := down.openDown(a.txt, 1, dec(0, true)); err != nil || pn != 1 || !bytes.Equal(plain, down1) {
 		t.Fatal("exchange down 1", err)
 	}
-	step("the client acks and sends FIN; the server's FIN after a 120ms hold", qmsg, amsg,
+	step("the client acks and sends FIN; the server answers at once with its FIN", qmsg, amsg,
 		obj{"up_pn": 1, "up_plaintext": hx(up1), "down_pn": 1, "down_plaintext": hx(down1)})
 	return out
 }

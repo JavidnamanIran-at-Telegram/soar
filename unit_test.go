@@ -296,6 +296,17 @@ func TestCloseWakesAllBlockedReaders(t *testing.T) {
 	}
 }
 
+// The unknown-session signature folds only ASCII letters, so every implementation signs the same
+// bytes whatever the question holds; bytes.ToLower would rewrite invalid UTF-8 (SPEC §4.5).
+func TestUnknownSessionFoldsOnlyASCII(t *testing.T) {
+	question := []byte{3, 'A', 'b', 0xC0, 0x80, 0xFF, 'Z', 0, 0x10}
+	got := unknownSessionMsg(question)[len(unknownContext):]
+	want := []byte{3, 'a', 'b', 0xC0, 0x80, 0xFF, 'z', 0, 0x10}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("folded %x, want %x", got, want)
+	}
+}
+
 func TestReplayedAnswerFailsForAnotherQuery(t *testing.T) {
 	c := &packetCipher{}
 	trunc := [2]byte{0, 5}

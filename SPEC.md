@@ -188,9 +188,11 @@ The server:
 3. Answers NOERROR with the 98-byte payload
    `server eph pub (32) || sid (u16) || Ed25519 signature over T (64)`.
 
-The server MUST answer every copy of a hello (the same client public key) with the same reply for
-as long as it keeps that session. The reference server keeps replies for a minute. If it can't
-create a session (it's overloaded, or out of sids), it answers REFUSED.
+The server SHOULD answer every copy of a hello (the same client public key) with the same reply
+while it keeps the reply cached. The reference server caches a reply for a minute, or until its
+session ends if that comes first. A copy arriving later may start a second session; that's
+harmless, since the client takes the first valid reply and the unused session idles out. If the
+server can't create a session (it's overloaded, or out of sids), it answers REFUSED.
 
 The client verifies the signature with the server's public key. It MUST ignore a reply whose
 signature doesn't verify, since forged answers are expected on hostile networks, and keep waiting.
