@@ -31,7 +31,7 @@ fetch CottenDNS https://github.com/WhiteDNS/CottenDNS 1f3cc524dddb
 fetch slipstream https://github.com/EndPositive/slipstream 397850b16e70
 (cd "$DIR/slipstream" && meson setup build --buildtype=release >/dev/null && ninja -C build >/dev/null)
 
-fetch soar-rs https://github.com/getlantern/soar-rs 9ec0a482eea4
+fetch soar-rs https://github.com/getlantern/soar-rs 60dc116aaf21
 (cd "$DIR/soar-rs" && cargo build -q --release --bin soar-server --bin soar-client)
 
 fetch slipstream-rust https://github.com/Mygod/slipstream-rust 7de506b222c8
