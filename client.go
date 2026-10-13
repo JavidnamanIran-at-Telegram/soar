@@ -727,9 +727,12 @@ func (c *Client) expireLocked(now time.Time) {
 			}
 			continue
 		}
-		// Packet threshold: three later queries on this path were answered. A poll counts only
-		// later polls: the server holds polls while it answers data queries at once, so being
-		// overtaken by those is no sign of loss.
+		// Packet threshold: a query sent three or more queries later on this path was answered.
+		// For a poll, that later query must itself be a poll: the server answers data queries at
+		// once while it holds polls, so being overtaken by those is no sign of loss, but it
+		// releases held polls in arrival order, so a later poll answered first means this one
+		// was lost. (seq counts every query, so with data queries in between this can be the
+		// very next poll; the srtt+2*rttvar margin still allows for reordering.)
 		answered := q.p.maxAnswered
 		if q.poll {
 			answered = q.p.maxPollAnswered
