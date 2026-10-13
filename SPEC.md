@@ -72,7 +72,7 @@ MUST NOT reject leftover bits that don't make a whole byte, whatever their value
 them. A name containing a character outside the alphabet carries no payload.
 
 A zone is one or more labels separated by dots, with an optional trailing dot. Each label MUST be
-1 to 63 printable ASCII characters (`!` to `~`, which excludes the dot). Zones are compared ignoring
+1 to 63 printable ASCII characters (`!` to `~`) other than the dot, which separates labels. Zones are compared ignoring
 ASCII case. Real zones use letters, digits and hyphens, but implementations MUST accept the full
 printable range, so that every implementation accepts the same configurations. A zone MUST also
 leave room for a 34-byte payload within 253 characters (the hello in section 4.2).
@@ -420,7 +420,9 @@ delivered. That's how upstream data is acknowledged.
 The server answers a data query **at once** if any of these holds:
 
 - its `hold_class` is 0;
-- its packet carried any frame other than ACK, LOST, PING and PADDING;
+- its packet carried any frame other than ACK, LOST, PING and PADDING. This includes a duplicate
+  packet, such as a resolver's retry: its frames aren't reapplied (§5.3), but they still decide
+  how it's answered;
 - the session is closed.
 
 Otherwise the server **holds** the query, up to `min(100 ms × hold_class, server cap)`. It answers
