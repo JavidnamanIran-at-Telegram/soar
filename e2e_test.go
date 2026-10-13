@@ -1153,3 +1153,37 @@ func TestIdleSessionGoesQuiet(t *testing.T) {
 	}
 	fetch(t, c, origin, 20000)
 }
+
+// Polls the server holds are overtaken by data queries it answers at once. That's no sign of
+// loss: an echo after a bulk fetch (which leaves polls held) must keep the full name length.
+func TestHeldPollsAreNotLost(t *testing.T) {
+	srv, pub := startServer(t)
+	origin := startOrigin(t)
+	c, err := NewClient(Config{Zone: testZone, ServerKey: pub, Resolvers: []string{srv}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	fetch(t, c, origin, 1<<20)
+	conn, err := c.DialContext(context.Background(), "tcp", origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(30 * time.Second))
+	up := make([]byte, 200<<10)
+	rand.Read(up)
+	go func() {
+		conn.Write([]byte("echo\n"))
+		conn.Write(up)
+	}()
+	got := make([]byte, len(up))
+	if _, err := io.ReadFull(conn, got); err != nil || !bytes.Equal(got, up) {
+		t.Fatal("echo failed", err)
+	}
+	for _, p := range c.PathStats() {
+		if p.NameLen != maxName {
+			t.Errorf("name length demoted to %d on a lossless path", p.NameLen)
+		}
+	}
+}
