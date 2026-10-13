@@ -48,7 +48,8 @@ type Config struct {
 	// StreamOnly reports resolvers that only speak a stream transport (DNS over
 	// TCP, or DNS over TLS through DialTCP, e.g. port 853): they get a TCP path
 	// from the start and never a UDP one, which would only time out, whatever
-	// TCP says, "off" included. Optional.
+	// TCP says, "off" included. Optional. It runs with the client's lock held, including
+	// when discovery adds a resolver, so it must return quickly and not call the Client.
 	StreamOnly func(resolver string) bool
 	// ListenPacket opens the client's UDP socket, and DialTCP its TCP/53 connections; a VPN
 	// client points them past its own tunnel, a test harness through a proxy. Defaults: net.
