@@ -117,15 +117,18 @@ filtering, TXT filtering, UDP blocking, answer injection). 100 KB fetch throughp
 
 | scenario | Soar | best other | connect |
 |---|---|---|---|
-| clean | **453** | 295 (VayDNS) | 0.2s |
-| realistic | **166** | 108 (slipstream-rust) | 0.5s |
-| lossy, 10% each way | **69** | 71 (slipstream-rust) | 0.5s |
-| rate-limited resolvers | **112** | 95 (slipstream-c, with failures) | 0.4s |
-| truncating resolver | **169** | 134 (VayDNS) | 0.4s |
-| 2 of 5 resolvers dead | 144 | 153 (VayDNS, given the one good resolver) | 0.75s |
-| Iran-like | **105** | 43 (CottenDNS, 17s to connect) | 0.7s |
-| Russia-like (UDP blocked) | **187** | 14 (CottenDNS, 18s to connect); dnstt, VayDNS, slipstream fail | 0.9s |
-| China-like (injection, rate limits) | **60** | 43 (slipstream-rust); VayDNS, MasterDnsVPN fail | 0.4s |
+| clean | **476** | 433 (VayDNS) | 0.3s |
+| realistic | **124** | 91 (slipstream-rust) | 0.5s |
+| lossy, 10% each way | **91** | 57 (slipstream-rust) | 1.4s |
+| rate-limited resolvers | **78** | 63 (slipstream-rust) | 0.4s |
+| truncating resolver | 168 | 169 (VayDNS), a tie | 0.4s |
+| 2 of 5 resolvers dead | **136** | 92 (VayDNS, given a good resolver) | 0.6s |
+| Iran-like | **69** | 31 (CottenDNS, 21s to connect) | 0.8s |
+| Russia-like (UDP blocked) | **130** | 13 (CottenDNS, 13s to connect); dnstt, VayDNS under 10; slipstream fails | 0.8s |
+| China-like (injection, rate limits) | 49 | **74** (CottenDNS); VayDNS, MasterDnsVPN fail | 1.1s |
+
+Each figure is the median of three runs of a 100 KB fetch of incompressible data; runs vary by
+about 15%.
 
 These are emulator results; field measurements from inside Iran, Russia and China come next.
 

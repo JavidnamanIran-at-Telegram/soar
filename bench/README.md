@@ -9,8 +9,8 @@ failures, and queries per KB.
   recursive resolver does. Each one can add delay, jitter, loss in either direction, a per-client
   rate limit, truncation or dropping of large answers, TXT filtering, a QNAME length limit, UDP
   blocking (TCP/53 still works), and forged answers racing the real ones. `emu/` also holds the
-  origin the tunnels fetch from; it serves a fixed byte pattern so every fetch is checked for
-  corruption.
+  origin the tunnels fetch from; it serves a fixed pseudo-random pattern, so every fetch is checked
+  for corruption and tunnels that compress their payload get no head start.
 - `bench/scenarios.go` defines the networks. The `iranlike`, `russialike` and `chinalike`
   scenarios are models built from public reports, not measurements.
 - `contenders/` runs each tunnel. Soar runs in-process; the others run from their own binaries.
