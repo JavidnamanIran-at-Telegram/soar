@@ -235,3 +235,37 @@ func (m *MasterDnsVPN) StartClient(ctx context.Context, env *bench.Env) (bench.D
 	}
 	return forwardDialer(l), waitTCP(ctx, l, 120*time.Second) // it tests every resolver before listening
 }
+
+// SoarRS is the Rust implementation of Soar (getlantern/soar-rs): the same protocol, run from its
+// soar-server and soar-client binaries.
+type SoarRS struct{ Server, Client string }
+
+func (s *SoarRS) Name() string  { return "soar-rs" }
+func (s *SoarRS) Notes() string { return "Rust implementation (all resolvers)" }
+func (s *SoarRS) StartServer(ctx context.Context, env *bench.Env) error {
+	out, err := exec.Command(s.Server, "keygen").Output()
+	if err != nil {
+		return fmt.Errorf("keygen: %v", err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if f := strings.Fields(line); len(f) == 2 {
+			if err := os.WriteFile(filepath.Join(env.WorkDir, f[0]), []byte(f[1]), 0o600); err != nil {
+				return err
+			}
+		}
+	}
+	return start(ctx, env, env.WorkDir, s.Server, "-zone", env.Zone, "-key-file", "private",
+		"-listen", env.ServerAddr, "-allow-private", "-allow-ports", "any")
+}
+func (s *SoarRS) StartClient(ctx context.Context, env *bench.Env) (bench.Dialer, error) {
+	pub, err := os.ReadFile(filepath.Join(env.WorkDir, "public"))
+	if err != nil {
+		return nil, err
+	}
+	l := freeTCP()
+	if err := start(ctx, env, env.WorkDir, s.Client, "-zone", env.Zone, "-pubkey", string(pub),
+		"-resolver", strings.Join(env.Resolvers, ","), "-listen", l, "-forward", env.Origin); err != nil {
+		return nil, err
+	}
+	return forwardDialer(l), waitTCP(ctx, l, 10*time.Second)
+}
