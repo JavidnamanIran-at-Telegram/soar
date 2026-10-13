@@ -90,7 +90,16 @@ type zone struct {
 }
 
 func parseZone(s string) (zone, error) {
-	s = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(s), "."))
+	// Validate the characters as given, then fold ASCII case only: Unicode folding would map
+	// some non-ASCII input onto ASCII (the Kelvin sign "\u212a" onto "k") and slip it past the
+	// check below.
+	s = strings.TrimSuffix(strings.TrimSpace(s), ".")
+	for i := range len(s) {
+		if s[i] < '!' || s[i] > '~' {
+			return zone{}, errors.New("soar: zone must be printable ASCII")
+		}
+	}
+	s = asciiLower(s)
 	if s == "" {
 		return zone{}, errors.New("soar: empty zone")
 	}
@@ -98,13 +107,6 @@ func parseZone(s string) (zone, error) {
 	for _, l := range strings.Split(s, ".") {
 		if l == "" || len(l) > maxLabel {
 			return zone{}, errors.New("soar: bad zone")
-		}
-		// Printable ASCII only (SPEC §3.1), so every implementation accepts the same zones and
-		// folds their case the same way.
-		for i := range len(l) {
-			if l[i] < '!' || l[i] > '~' {
-				return zone{}, errors.New("soar: zone must be printable ASCII")
-			}
 		}
 		w = append(w, byte(len(l)))
 		w = append(w, l...)
@@ -114,6 +116,18 @@ func parseZone(s string) (zone, error) {
 		return zone{}, errors.New("soar: zone too long to carry a handshake")
 	}
 	return z, nil
+}
+
+// asciiLower folds A-Z to a-z and leaves every other byte alone. Zones are printable ASCII
+// (SPEC §3.1), so every implementation folds them the same way.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
 }
 
 // maxPayload returns how many bytes fit base32-encoded under z in a name of at most nameLen

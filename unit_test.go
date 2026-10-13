@@ -463,7 +463,7 @@ func TestZoneSyntax(t *testing.T) {
 			t.Errorf("%q rejected: %v", ok, err)
 		}
 	}
-	for _, bad := range []string{"", ".", "a..b", strings.Repeat("a", 64) + ".x", "caf\xc3\xa9.example", "a b.example", "tab\t.example"} {
+	for _, bad := range []string{"", ".", "a..b", strings.Repeat("a", 64) + ".x", "caf\xc3\xa9.example", "a b.example", "tab\t.example", "\u212a.example"} {
 		if _, err := parseZone(bad); err == nil {
 			t.Errorf("%q accepted", bad)
 		}
