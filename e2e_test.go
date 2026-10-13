@@ -1193,21 +1193,26 @@ func TestHeldPollsAreNotLost(t *testing.T) {
 // The server releases held polls in arrival order, which the client relies on to tell a lost
 // poll from a held one. A later poll whose LOST frame makes data pending again must not be
 // answered ahead of an older held poll.
-func TestHeldPollsReleasedOldestFirst(t *testing.T) {
+// rawSession handshakes with a fresh server over UDP by hand, for tests that need to control
+// exactly which queries the server sees. It returns functions to send a query, collect the
+// answers that arrive within a duration, and seal the next upstream packet (hold 500 ms), and
+// the address of an origin the server can reach.
+func rawSession(t *testing.T) (send func(uint16, []byte), recv func(time.Duration) []*answer, packet func([]byte) []byte, origin string) {
+	t.Helper()
 	srv, pub := startServer(t)
-	origin := startOrigin(t)
+	origin = startOrigin(t)
 	z, _ := parseZone(testZone)
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pc.Close()
+	t.Cleanup(func() { pc.Close() })
 	saddr, _ := net.ResolveUDPAddr("udp", srv)
-	send := func(txn uint16, payload []byte) {
+	send = func(txn uint16, payload []byte) {
 		pc.WriteTo(appendQuery(nil, txn, payload, z, typeTXT, 1232), saddr)
 	}
 	// recv collects the answers that arrive within d, in order.
-	recv := func(d time.Duration) []*answer {
+	recv = func(d time.Duration) []*answer {
 		var out []*answer
 		buf := make([]byte, 4096)
 		pc.SetReadDeadline(time.Now().Add(d))
@@ -1232,7 +1237,7 @@ func TestHeldPollsReleasedOldestFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 	pn := uint64(0)
-	packet := func(frames []byte) []byte {
+	packet = func(frames []byte) []byte {
 		plain := append([]byte{0x50}, frames...) // hold 500 ms
 		for len(plain) < 5 {
 			plain = append(plain, frPadding)
@@ -1245,6 +1250,26 @@ func TestHeldPollsReleasedOldestFirst(t *testing.T) {
 		m := up.mask(sealed)
 		return append([]byte{hdr[0], hdr[1], hdr[2] ^ m[0], hdr[3] ^ m[1]}, sealed...)
 	}
+	return send, recv, packet, origin
+}
+
+// A resolver's retry of a query that carried data is a duplicate packet. The server doesn't
+// reapply it, but must still answer it at once, as it did the original, not hold it like a poll.
+func TestDuplicateDataQueryAnsweredAtOnce(t *testing.T) {
+	send, recv, packet, origin := rawSession(t)
+	open := append([]byte{byte(len(origin))}, origin...)
+	data := packet(appendStream(nil, 0, 0, open, false, false)) // pn 0: opens a stream
+	send(2, data)
+	send(3, packet([]byte{frPing})) // pn 1: collects OPENED, so nothing is left to send
+	recv(300 * time.Millisecond)
+	send(4, data) // the retry
+	if got := recv(200 * time.Millisecond); len(got) != 1 || got[0].txn != 4 {
+		t.Fatalf("the retried data query wasn't answered at once (%d answers in 200ms)", len(got))
+	}
+}
+
+func TestHeldPollsReleasedOldestFirst(t *testing.T) {
+	send, recv, packet, origin := rawSession(t)
 	open := append([]byte{byte(len(origin))}, origin...)
 	open = append(open, "echo\n"...)
 	send(2, packet(appendStream(nil, 0, 0, open, false, false))) // pn 0: opens the stream
