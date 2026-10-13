@@ -475,10 +475,15 @@ Only the client opens streams. It numbers them 0, 1, 2, … in the order it open
 reuses a number. On the server, a stream opens when its id first appears in a STREAM or
 MAX_STREAM_DATA frame. The reference client sends MAX_STREAM_DATA as it opens a stream, ahead of
 any data, so that's usually the frame that opens it. RESET_STREAM for an unknown id is ignored.
-Since packets can arrive out of order, the server accepts a new id up to `max_streams` beyond the highest it has
-seen, and remembers which lower ids were skipped so they can still open later. Above that window,
-or when it's at its stream limit, it refuses the stream with RESET_STREAM. The reference server
-allows 128 streams per session. Clients SHOULD stay within it.
+Since packets can arrive out of order, the server accepts a new id up to `max_streams` beyond the
+highest it has seen, and remembers which lower ids were skipped so they can still open later.
+
+- **Frames for other ids are ignored, without a reply:** ids at or above that window, and lower
+  ids that aren't skipped ones (they belong to streams that already finished).
+- **A new id within the window is refused with RESET_STREAM (code 0)** when the server is at its
+  stream limit, either for the session or across all sessions.
+
+The reference server allows 128 streams per session. Clients SHOULD stay within it.
 
 ### 8.2 Destination
 
