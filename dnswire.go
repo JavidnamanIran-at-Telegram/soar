@@ -99,6 +99,13 @@ func parseZone(s string) (zone, error) {
 		if l == "" || len(l) > maxLabel {
 			return zone{}, errors.New("soar: bad zone")
 		}
+		// Printable ASCII only (SPEC §3.1), so every implementation accepts the same zones and
+		// folds their case the same way.
+		for i := range len(l) {
+			if l[i] < '!' || l[i] > '~' {
+				return zone{}, errors.New("soar: zone must be printable ASCII")
+			}
+		}
 		w = append(w, byte(len(l)))
 		w = append(w, l...)
 	}

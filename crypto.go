@@ -142,7 +142,8 @@ func downAD(trunc [2]byte, upPN uint64) []byte {
 }
 
 // sealUp builds an upstream packet: the session id, the protected truncated packet number, and
-// the sealed plaintext. The first two are the associated data, unprotected.
+// the sealed plaintext. The associated data is the session id and the truncated packet number
+// unmasked; on the wire the packet number is masked.
 func (c *packetCipher) sealUp(sid uint16, pn uint64, plain []byte) []byte {
 	var hdr [4]byte
 	binary.BigEndian.PutUint16(hdr[:], sid)

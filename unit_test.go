@@ -457,6 +457,19 @@ func TestFinalSizeIsEnforced(t *testing.T) {
 	}
 }
 
+func TestZoneSyntax(t *testing.T) {
+	for _, ok := range []string{"t.example.com", "T.Example.COM.", "_soar.example.com", strings.Repeat("a", 63) + ".x"} {
+		if _, err := parseZone(ok); err != nil {
+			t.Errorf("%q rejected: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"", ".", "a..b", strings.Repeat("a", 64) + ".x", "caf\xc3\xa9.example", "a b.example", "tab\t.example"} {
+		if _, err := parseZone(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}
+
 func TestZoneTooLongForHandshake(t *testing.T) {
 	long := strings.Repeat("a", 60) + "." + strings.Repeat("b", 60) + "." + strings.Repeat("c", 60) + ".abcdefghij.example.com"
 	if _, err := parseZone(long); err == nil {
