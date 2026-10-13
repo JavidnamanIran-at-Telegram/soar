@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"strconv"
 	"strings"
@@ -58,9 +59,17 @@ func serveOrigin(c net.Conn) {
 	}
 }
 
+// pattern is 16K of seeded pseudo-random bytes. It doesn't compress, as real (encrypted) traffic
+// doesn't, so tunnels that compress their payload get no head start.
+var pattern = func() []byte {
+	b := make([]byte, 16<<10)
+	rand.NewChaCha8([32]byte{}).Read(b)
+	return b
+}()
+
 // Pattern is the byte at offset i of every origin response (a fixed period-16K pattern), so the
 // fetcher can verify integrity without holding the expected bytes.
-func Pattern(i int) byte { return byte(i*7 + i>>8) }
+func Pattern(i int) byte { return pattern[i%len(pattern)] }
 
 // Fetch requests n bytes over conn and returns time to first byte and total time; it verifies the
 // bytes against Pattern.
