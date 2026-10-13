@@ -30,7 +30,7 @@ func TestPathStatsSnapshot(t *testing.T) {
 			t.Fatalf("TCP=%s: paths in configuration order: %+v", tc.tcp, st)
 		}
 		for _, s := range st {
-			if s.Transport != tc.transport || s.Verified || s.AnswerBytes < 512 || s.NameLen <= 0 || s.RecordType != "TXT" {
+			if s.Transport != tc.transport || s.Verified || s.AnswerBytes != 0 || s.NameLen <= 0 || s.RecordType != "TXT" {
 				t.Fatalf("TCP=%s: fresh path: %+v", tc.tcp, s)
 			}
 		}

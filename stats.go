@@ -15,7 +15,7 @@ type PathStat struct {
 	Inflight    int           `json:"inflight"`
 	Window      float64       `json:"window"`
 	NameLen     int           `json:"name_len"`   // current query-name cap
-	AnswerBytes int           `json:"answer_max"` // largest answer size shown to arrive
+	AnswerBytes int           `json:"answer_max"` // largest answer size shown to arrive; 0 until verified
 	RecordType  string        `json:"record_type"`
 	Successes   int           `json:"successes"`
 	LastSuccess time.Time     `json:"last_success,omitzero"`
@@ -38,7 +38,6 @@ func (c *Client) PathStats() []PathStat {
 			Inflight:    p.inflight,
 			Window:      p.cwnd,
 			NameLen:     p.nameLen,
-			AnswerBytes: 512 + 48*p.sizeOK,
 			RecordType:  "TXT",
 			Successes:   p.successes,
 			LastSuccess: p.lastSuccess,
@@ -48,6 +47,9 @@ func (c *Client) PathStats() []PathStat {
 		}
 		if p.hasRTT {
 			s.RTT = p.srtt
+		}
+		if p.verified {
+			s.AnswerBytes = 512 + 48*p.sizeOK
 		}
 		if p.qtype == typeAAAA {
 			s.RecordType = "AAAA"

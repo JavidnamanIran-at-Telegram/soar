@@ -42,11 +42,13 @@ type Config struct {
 	SendBuffer   int    // per-stream send buffer. Default 64 KiB.
 	MaxStreams   int    // Default 64.
 	// TCP controls TCP/53 paths: "auto" (default) adds one for a resolver whose UDP path never
-	// answers, "on" adds one for every resolver up front, "only" uses TCP alone, "off" never.
+	// answers, "on" adds one for every resolver up front, "only" uses TCP alone, "off" never
+	// (except for resolvers StreamOnly reports).
 	TCP string
 	// StreamOnly reports resolvers that only speak a stream transport (DNS over
 	// TCP, or DNS over TLS through DialTCP, e.g. port 853): they get a TCP path
-	// from the start and never a UDP one, which would only time out. Optional.
+	// from the start and never a UDP one, which would only time out, whatever
+	// TCP says, "off" included. Optional.
 	StreamOnly func(resolver string) bool
 	// ListenPacket opens the client's UDP socket, and DialTCP its TCP/53 connections; a VPN
 	// client points them past its own tunnel, a test harness through a proxy. Defaults: net.
