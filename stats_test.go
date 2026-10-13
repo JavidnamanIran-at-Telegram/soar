@@ -89,4 +89,8 @@ func TestEstablishedDuringHandshake(t *testing.T) {
 	if !c.Established() {
 		t.Fatal("not established after a fetch")
 	}
+	c.Close()
+	if c.Established() {
+		t.Fatal("established after Close")
+	}
 }

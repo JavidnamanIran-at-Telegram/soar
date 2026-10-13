@@ -70,6 +70,11 @@ func (c *Client) Established() bool {
 		return false
 	}
 	select {
+	case <-c.done:
+		return false
+	default:
+	}
+	select {
 	case <-cs.ready:
 		return cs.session != nil && !cs.isClosed()
 	default:
