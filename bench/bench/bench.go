@@ -220,11 +220,15 @@ func fmtDur(d time.Duration) string {
 	return fmt.Sprintf("%.1fs", d.Seconds())
 }
 
-// LogFile returns a writer for a contender's subprocess output under dir.
-func LogFile(dir, name string) io.Writer {
+// LogFile returns a writer for a contender's subprocess output under dir; the caller closes it.
+func LogFile(dir, name string) io.WriteCloser {
 	f, err := os.Create(filepath.Join(dir, name+".log"))
 	if err != nil {
-		return io.Discard
+		return nopCloser{io.Discard}
 	}
 	return f
 }
+
+type nopCloser struct{ io.Writer }
+
+func (nopCloser) Close() error { return nil }

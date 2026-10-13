@@ -57,7 +57,9 @@ func TestTCPAnswersSkipUDPLimits(t *testing.T) {
 	}
 	defer u.Close()
 	u.SetDeadline(time.Now().Add(3 * time.Second))
-	u.Write(query(1, "udp"))
+	if _, err := u.Write(query(1, "udp")); err != nil {
+		t.Fatal(err)
+	}
 	buf := make([]byte, 4096)
 	n, err := u.Read(buf)
 	if err != nil {
@@ -74,7 +76,9 @@ func TestTCPAnswersSkipUDPLimits(t *testing.T) {
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(3 * time.Second))
 	q := query(2, "tcp")
-	c.Write(append(binary.BigEndian.AppendUint16(nil, uint16(len(q))), q...))
+	if _, err := c.Write(append(binary.BigEndian.AppendUint16(nil, uint16(len(q))), q...)); err != nil {
+		t.Fatal(err)
+	}
 	var hdr [2]byte
 	if _, err := io.ReadFull(c, hdr[:]); err != nil {
 		t.Fatal(err)

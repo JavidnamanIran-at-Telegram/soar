@@ -65,7 +65,9 @@ func main() {
 				continue
 			}
 			fmt.Fprintf(os.Stderr, "running %s / %s ...\n", sc.Name, c.Name())
-			r := bench.Run(context.Background(), c, sc, *trials, *timeout, bench.LogFile(logDir, sc.Name+"-"+c.Name()))
+			log := bench.LogFile(logDir, sc.Name+"-"+c.Name())
+			r := bench.Run(context.Background(), c, sc, *trials, *timeout, log)
+			log.Close()
 			results = append(results, r)
 			fmt.Fprint(os.Stderr, bench.Table([]bench.Result{r}))
 		}
