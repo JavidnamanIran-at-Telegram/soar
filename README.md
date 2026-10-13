@@ -58,6 +58,9 @@ what censors and resolvers actually do (see [Benchmarks](#benchmarks)).
 
 ### Wire format
 
+The full specification is [SPEC.md](SPEC.md), with test vectors in
+[testdata/vectors.json](testdata/vectors.json) for other implementations. In outline:
+
 Upstream, in the query name under the zone (lower-case base32):
 
 ```
@@ -74,8 +77,8 @@ data:   protected pn (2) | seal( held (1, x10ms) | backlog (1) | frames ) | tag 
 ```
 
 Frames: `PADDING`, `PING`, `ACK` (ranges), `RESET_STREAM`, `MAX_STREAM_DATA`, `CLOSE`, `LOST`
-(upstream pns that got no answer), `STREAM` (id, offset, length, FIN). A stream's first bytes
-name its destination.
+(upstream pns that got no answer), `OPENED` (the server reached a stream's destination), `STREAM`
+(id, offset, length, FIN). A stream's first bytes name its destination.
 
 ## Usage
 

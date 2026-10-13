@@ -943,16 +943,9 @@ func (c *Client) sendDataLocked(cs *clientSession, p *path, now time.Time, allow
 		}
 	}
 	dup := allowDup && pkt != nil && len(pkt.streams) > 0 && p.verified && !cs.hasData()
-	var ad [4]byte
-	binary.BigEndian.PutUint16(ad[:], cs.sid)
-	binary.BigEndian.PutUint16(ad[2:], uint16(pn))
-	sealed := cs.seal.seal(nil, ad[:], plain, pn)
+	payload := cs.seal.sealUp(cs.sid, pn, plain)
 	cs.mu.Unlock()
 	dbg("cli send pn=%d path=%s plain=%x", pn, p.addr, plain)
-	m := cs.seal.mask(sealed)
-	payload := make([]byte, 0, 4+len(sealed))
-	payload = append(payload, ad[0], ad[1], ad[2]^m[0], ad[3]^m[1])
-	payload = append(payload, sealed...)
 
 	timeout := p.rto()
 	if !data {
@@ -1075,15 +1068,13 @@ func (c *Client) onAnswer(msg []byte) {
 		return
 	}
 	cs := q.sess
-	if cs == nil || cs.session == nil || len(a.txt) < 2+sampleLen {
+	if cs == nil || cs.session == nil {
 		return
 	}
-	sealed := a.txt[2:]
-	m := cs.open.mask(sealed)
-	ad := [2]byte{a.txt[0] ^ m[0], a.txt[1] ^ m[1]}
 	cs.mu.Lock()
-	pn := decodePN(cs.largestRecv, cs.haveRecv, binary.BigEndian.Uint16(ad[:]))
-	plain, err := cs.open.open(downAD(ad, q.pn), sealed, pn)
+	pn, plain, err := cs.open.openDown(a.txt, q.pn, func(trunc uint16) uint64 {
+		return decodePN(cs.largestRecv, cs.haveRecv, trunc)
+	})
 	if err != nil || len(plain) < 2 {
 		cs.mu.Unlock()
 		dbg("cli auth fail pn=%d err=%v", pn, err)
