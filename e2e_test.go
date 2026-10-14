@@ -3,8 +3,10 @@ package soar
 import (
 	"bytes"
 	"context"
+	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -1152,4 +1154,144 @@ func TestIdleSessionGoesQuiet(t *testing.T) {
 		t.Fatalf("idle session sent %d queries", n)
 	}
 	fetch(t, c, origin, 20000)
+}
+
+// Polls the server holds are overtaken by data queries it answers at once. That's no sign of
+// loss: an echo after a bulk fetch (which leaves polls held) must keep the full name length.
+func TestHeldPollsAreNotLost(t *testing.T) {
+	srv, pub := startServer(t)
+	origin := startOrigin(t)
+	c, err := NewClient(Config{Zone: testZone, ServerKey: pub, Resolvers: []string{srv}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	fetch(t, c, origin, 1<<20)
+	conn, err := c.DialContext(context.Background(), "tcp", origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(30 * time.Second))
+	up := make([]byte, 200<<10)
+	rand.Read(up)
+	go func() {
+		conn.Write([]byte("echo\n"))
+		conn.Write(up)
+	}()
+	got := make([]byte, len(up))
+	if _, err := io.ReadFull(conn, got); err != nil || !bytes.Equal(got, up) {
+		t.Fatal("echo failed", err)
+	}
+	for _, p := range c.PathStats() {
+		if p.NameLen != maxName {
+			t.Errorf("name length demoted to %d on a lossless path", p.NameLen)
+		}
+	}
+}
+
+// The server releases held polls in arrival order, which the client relies on to tell a lost
+// poll from a held one. A later poll whose LOST frame makes data pending again must not be
+// answered ahead of an older held poll.
+// rawSession handshakes with a fresh server over UDP by hand, for tests that need to control
+// exactly which queries the server sees. It returns functions to send a query, collect the
+// answers that arrive within a duration, and seal the next upstream packet (hold 500 ms), and
+// the address of an origin the server can reach.
+func rawSession(t *testing.T) (send func(uint16, []byte), recv func(time.Duration) []*answer, packet func([]byte) []byte, origin string) {
+	t.Helper()
+	srv, pub := startServer(t)
+	origin = startOrigin(t)
+	z, _ := parseZone(testZone)
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pc.Close() })
+	saddr, _ := net.ResolveUDPAddr("udp", srv)
+	send = func(txn uint16, payload []byte) {
+		pc.WriteTo(appendQuery(nil, txn, payload, z, typeTXT, 1232), saddr)
+	}
+	// recv collects the answers that arrive within d, in order.
+	recv = func(d time.Duration) []*answer {
+		var out []*answer
+		buf := make([]byte, 4096)
+		pc.SetReadDeadline(time.Now().Add(d))
+		for {
+			n, _, err := pc.ReadFrom(buf)
+			if err != nil {
+				return out
+			}
+			if a, err := parseAnswer(buf[:n]); err == nil {
+				out = append(out, a)
+			}
+		}
+	}
+	eph, _ := ecdh.X25519().GenerateKey(rand.Reader)
+	send(1, append([]byte{0, 0}, eph.PublicKey().Bytes()...))
+	hello := recv(500 * time.Millisecond)
+	if len(hello) == 0 {
+		t.Fatal("no hello reply")
+	}
+	sid, up, _, err := clientFinish(pub, eph, hello[0].txt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pn := uint64(0)
+	packet = func(frames []byte) []byte {
+		plain := append([]byte{0x50}, frames...) // hold 500 ms
+		for len(plain) < 5 {
+			plain = append(plain, frPadding)
+		}
+		pn++
+		var hdr [4]byte
+		binary.BigEndian.PutUint16(hdr[:], sid)
+		binary.BigEndian.PutUint16(hdr[2:], uint16(pn-1))
+		sealed := up.seal(nil, hdr[:], plain, pn-1)
+		m := up.mask(sealed)
+		return append([]byte{hdr[0], hdr[1], hdr[2] ^ m[0], hdr[3] ^ m[1]}, sealed...)
+	}
+	return send, recv, packet, origin
+}
+
+// A resolver's retry of a query that carried data is a duplicate packet. The server doesn't
+// reapply it, but must still answer it at once, as it did the original, not hold it like a poll.
+func TestDuplicateDataQueryAnsweredAtOnce(t *testing.T) {
+	send, recv, packet, origin := rawSession(t)
+	open := append([]byte{byte(len(origin))}, origin...)
+	data := packet(appendStream(nil, 0, 0, open, false, false)) // pn 0: opens a stream
+	send(2, data)
+	send(3, packet([]byte{frPing})) // pn 1: collects OPENED, so nothing is left to send
+	recv(300 * time.Millisecond)
+	send(4, data) // the retry
+	if got := recv(200 * time.Millisecond); len(got) != 1 || got[0].txn != 4 {
+		t.Fatalf("the retried data query wasn't answered at once (%d answers in 200ms)", len(got))
+	}
+}
+
+func TestHeldPollsReleasedOldestFirst(t *testing.T) {
+	send, recv, packet, origin := rawSession(t)
+	open := append([]byte{byte(len(origin))}, origin...)
+	open = append(open, "echo\n"...)
+	send(2, packet(appendStream(nil, 0, 0, open, false, false))) // pn 0: opens the stream
+	send(3, packet([]byte{frPing}))                              // pn 1: a poll for OPENED
+	recv(300 * time.Millisecond)
+	// pn 2 sends "hello". Its answer goes out at once, before the relay even forwards the bytes,
+	// so the echo is pending, with no poll held, by the time pn 3 arrives.
+	send(4, packet(appendStream(nil, 0, uint64(len(open)), []byte("hello"), false, false)))
+	recv(200 * time.Millisecond)
+	send(5, packet([]byte{frPing})) // pn 3: carries the echoed "hello"
+	if got := recv(300 * time.Millisecond); len(got) != 1 || got[0].txn != 5 {
+		t.Fatalf("pn 3 should carry the echo: got %d answers", len(got))
+	}
+	send(6, packet([]byte{frPing})) // pn 4: held, nothing left to send
+	recv(100 * time.Millisecond)
+	send(7, packet(appendLost(nil, []uint64{3}))) // pn 5: reports pn 3's answer lost
+	got := recv(300 * time.Millisecond)
+	if len(got) == 0 || got[0].txn != 6 {
+		var txns []uint16
+		for _, a := range got {
+			txns = append(txns, a.txn)
+		}
+		t.Fatalf("answers %v: the poll held first (txn 6) must be answered before the later one (txn 7)", txns)
+	}
 }

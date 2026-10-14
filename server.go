@@ -457,9 +457,13 @@ func (ss *srvSession) onQuery(q *query, addr net.Addr, p []byte) {
 	var out []sendItem
 	if ss.abandoned.contains(pn) {
 		out = append(out, ss.emptyAnswerLocked(hq, now))
-	} else if ss.closed || hold == 0 || ss.rxData || ss.hasData() {
+	} else if ss.closed || hold == 0 || ss.rxData {
 		out = append(out, ss.answerLocked(hq, now))
 	} else {
+		// A poll joins the queue even when there's data to send: the drain below answers the
+		// queue oldest first, at once. Releasing polls in arrival order is what lets the client
+		// tell a lost poll from a held one; answering this one first would leave older polls
+		// looking lost.
 		ss.held = append(ss.held, hq)
 		hq.timer = time.AfterFunc(hold, func() { ss.expire(hq) })
 		// Bound held queries per session; answer the oldest.
