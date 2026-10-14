@@ -203,8 +203,7 @@ func TestLivenessClockRestartsWithQueriesOut(t *testing.T) {
 	st.sbuf = append(st.sbuf, "\x03a:1"...)
 	st.spending.add(0, uint64(len(st.sbuf)))
 	cs.mu.Unlock()
-	now := time.Now()
-	c.fillLocked(now)
+	c.fillLocked(time.Now())
 	var q *pendingQuery
 	for _, p := range c.pending {
 		if !p.hello {
@@ -216,6 +215,14 @@ func TestLivenessClockRestartsWithQueriesOut(t *testing.T) {
 		c.mu.Unlock()
 		t.Fatalf("want two queries out, have %d", len(c.pending))
 	}
+	// Every path then goes dead, so nothing new is sent to restart the clock.
+	for _, p := range c.paths {
+		p.suspended = time.Now().Add(time.Hour)
+	}
+	// The clock started well before the answer, so one left running can be told apart from
+	// one the answer restarted.
+	cs.unanswered = cs.unanswered.Add(-5 * time.Second)
+	started := cs.unanswered
 	c.mu.Unlock()
 	// The server's answer to one of them, sealed with the session's (zero) keys.
 	plain := []byte{0, 0, frPing, 0, 0, 0}
@@ -225,6 +232,13 @@ func TestLivenessClockRestartsWithQueriesOut(t *testing.T) {
 	defer c.mu.Unlock()
 	if cs.unanswered.IsZero() {
 		t.Fatal("the liveness clock stopped with a query still out")
+	}
+	if cs.unanswered.Before(started.Add(4 * time.Second)) {
+		t.Fatal("the liveness clock didn't restart at the answer")
+	}
+	c.checkLivenessLocked(started.Add(deadSessionAfter + time.Second))
+	if cs.isClosed() {
+		t.Fatal("the session was presumed lost counting from before the answer")
 	}
 	c.checkLivenessLocked(time.Now().Add(deadSessionAfter + time.Second))
 	if !cs.isClosed() {
