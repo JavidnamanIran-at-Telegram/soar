@@ -44,7 +44,9 @@ type ServerConfig struct {
 	MaxBytesPerPrefix int
 	StreamWindow      uint64
 	SendBuffer        int
-	MaxStreams        int
+	// MaxStreams caps streams per session. Default 128; at most 256, so stream control frames
+	// fit the session's queue.
+	MaxStreams int
 	Logger            *slog.Logger
 }
 

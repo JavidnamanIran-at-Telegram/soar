@@ -31,7 +31,8 @@ type Config struct {
 	SafeQName, MaxQName int
 	// Hold is how long the server may hold an idle poll. Default 500ms.
 	Hold time.Duration
-	// MaxInflight caps queries outstanding across all paths. Default 128.
+	// MaxInflight caps queries outstanding across all paths. Default 128; at most 1,024, which
+	// keeps pending queries well inside the DNS ID space.
 	MaxInflight int
 	// MaxPathWindow caps one path's queries outstanding. Default 32.
 	MaxPathWindow int
@@ -41,7 +42,7 @@ type Config struct {
 	MaxAnswer    int
 	StreamWindow uint64 // per-stream receive window. Default 256 KiB.
 	SendBuffer   int    // per-stream send buffer. Default 64 KiB.
-	MaxStreams   int    // Default 64.
+	MaxStreams   int    // Default 64; at most 256, so stream control frames fit the session's queue.
 	// TCP controls TCP/53 paths: "auto" (default) adds one for a resolver whose UDP path never
 	// answers, "on" adds one for every resolver up front, "only" uses TCP alone, "off" never
 	// (except for resolvers StreamOnly reports).

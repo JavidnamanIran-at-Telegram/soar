@@ -35,7 +35,9 @@ type Discovery struct {
 	// lists are exhausted. Off by default: probing many in-country addresses from a user's device
 	// is a visible pattern, so enable it deliberately.
 	SampleRanges int
-	// Want stops adding candidates once this many paths are verified. Default 16.
+	// Want stops adding candidates once this many paths are healthy: verified and working now.
+	// A verified path that's unusable or on a run of losses doesn't count, so discovery resumes
+	// when resolvers that worked get blocked. Default 16.
 	Want int
 	// Concurrency bounds unverified candidates being probed at once. Default 16.
 	Concurrency int
@@ -225,7 +227,7 @@ func (c *Client) wantsCandidateLocked(now time.Time) bool {
 	return healthy < d.Want && probing < d.Concurrency
 }
 
-// discoverLocked adds candidate paths at the configured pace while too few paths are verified,
+// discoverLocked adds candidate paths at the configured pace while too few paths are healthy,
 // and prunes candidates that failed without ever answering.
 func (c *Client) discoverLocked(now time.Time) {
 	d := &c.cfg.Discovery
