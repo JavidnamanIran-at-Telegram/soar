@@ -23,6 +23,14 @@ func gapClient(t *testing.T, cfg Config) *Client {
 	return c
 }
 
+// enableDiscovery turns discovery on with cands, under c.mu. Tests build the client with it off,
+// so its run loop can't add a candidate before the test takes the lock.
+func enableDiscovery(c *Client, want int, cands ...string) {
+	c.cfg.Discovery.Enabled, c.cfg.Discovery.Want, c.cfg.Discovery.noBundled = true, want, true
+	c.cfg.Discovery.setDefaults()
+	c.cands, c.candIdx = cands, 0
+}
+
 // establish gives c a session as if a handshake had completed.
 func establish(c *Client) *clientSession {
 	cs := &clientSession{ready: make(chan struct{}), established: true, sid: 1}
@@ -35,12 +43,11 @@ func establish(c *Client) *clientSession {
 // A verified path on a run of losses isn't healthy, though as the last usable path it's kept
 // usable: discovery must look for a replacement instead of counting it toward Want.
 func TestDiscoveryResumesWhenVerifiedPathFails(t *testing.T) {
-	c := gapClient(t, Config{Resolvers: []string{"192.0.2.1:53"}, TCP: "off",
-		Discovery: Discovery{Enabled: true, Want: 1, Candidates: []string{"192.0.2.2:53"}, noBundled: true}})
+	c := gapClient(t, Config{Resolvers: []string{"192.0.2.1:53"}, TCP: "off"})
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	enableDiscovery(c, 1, "192.0.2.2:53")
 	now := time.Now()
-	c.lastCand = time.Time{}
 	p := c.paths[0]
 	p.verified = true
 	c.discoverLocked(now)
@@ -130,10 +137,10 @@ func TestDNSIDSpaceStaysBounded(t *testing.T) {
 
 // The run loop wakes when discovery's pace allows the next candidate, not a second later.
 func TestDiscoveryPaceSchedulesAWakeup(t *testing.T) {
-	c := gapClient(t, Config{TCP: "off", Discovery: Discovery{Enabled: true,
-		Candidates: []string{"192.0.2.1:53", "192.0.2.2:53", "192.0.2.3:53"}, noBundled: true}})
+	c := gapClient(t, Config{Resolvers: []string{"192.0.2.1:53"}, TCP: "off"})
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	enableDiscovery(c, 16, "192.0.2.2:53", "192.0.2.3:53", "192.0.2.4:53")
 	now := time.Now()
 	c.lastCand = now
 	if d := c.nextDeadlineLocked(now); d > 2*c.cfg.Discovery.Pace {
