@@ -243,9 +243,13 @@ type SoarRS struct{ Server, Client string }
 func (s *SoarRS) Name() string  { return "soar-rs" }
 func (s *SoarRS) Notes() string { return "Rust implementation (all resolvers)" }
 func (s *SoarRS) StartServer(ctx context.Context, env *bench.Env) error {
-	out, err := exec.Command(s.Server, "keygen").Output()
+	// The keys come on stdout; stderr is kept apart so a failure says why.
+	cmd := exec.CommandContext(ctx, s.Server, "keygen")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		return fmt.Errorf("keygen: %v", err)
+		return fmt.Errorf("keygen: %v %s", err, stderr.String())
 	}
 	for _, line := range strings.Split(string(out), "\n") {
 		if f := strings.Fields(line); len(f) == 2 {
