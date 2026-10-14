@@ -113,15 +113,29 @@ func (s *session) queueCtrl(c ctrl) {
 			}
 		}
 	}
+	// The same frame already waiting (a second RESET or OPENED for a stream) adds nothing.
+	if slices.Contains(s.ctrlQ, c) {
+		return
+	}
+	// Callers update their state as if the frame will go out (a read raises rmax before its
+	// MAX_STREAM_DATA), so dropping one would stall a stream for good. Legitimate traffic stays
+	// far below the cap: grants coalesce per stream, and each stream has one OPENED and one RESET
+	// at most. Only a misbehaving peer fills it (say, opening stream after stream past the limit,
+	// each refused with a RESET), so end the session.
 	if len(s.ctrlQ) >= maxCtrlQueue {
-		return // a peer can't make us queue without bound; lost frames are re-sent anyway
+		s.closeLocked(errors.New("soar: control frame queue overflow"))
+		return
 	}
 	s.ctrlQ = append(s.ctrlQ, c)
 }
 
 const (
 	maxCtrlQueue = 1024
-	replayWindow = 1 << 14
+	// maxStreamsCap caps MaxStreams, client and server alike. A stream queues at most three
+	// control frames (a window grant, OPENED, RESET), so this many streams fit the control
+	// queue with room to spare, and only a misbehaving peer can overflow it.
+	maxStreamsCap = maxCtrlQueue / 4
+	replayWindow  = 1 << 14
 )
 
 // openStream creates a client stream. Caller holds s.mu.
@@ -135,6 +149,10 @@ func (s *session) openStream() (*stream, error) {
 	st := newStream(s, s.nextStreamID)
 	s.nextStreamID++
 	st.advertise()
+	// Advertising can overflow the control queue and end the session.
+	if s.closed {
+		return nil, s.closeErr
+	}
 	s.streams[st.id] = st
 	s.rr = append(s.rr, st.id)
 	return st, nil
@@ -148,6 +166,11 @@ func (s *session) maybeRemove(st *stream) {
 	if st.rclosed && !st.rfin && !st.reset {
 		// We stopped reading before the peer finished: tell it to stop sending.
 		s.queueCtrl(ctrl{typ: frReset, id: st.id})
+		// That can overflow the control queue and end the session, which already removed
+		// every stream and gave back its slot: don't give this one back twice.
+		if _, ok := s.streams[st.id]; !ok {
+			return
+		}
 	}
 	delete(s.streams, st.id)
 	if !s.client && s.streamGone != nil {
@@ -321,6 +344,14 @@ func (s *session) peerStream(id uint64) *stream {
 	}
 	st := newStream(s, id)
 	st.advertise()
+	// Advertising can overflow the control queue and end the session. The slot acceptFn
+	// reserved above isn't owned by any stream yet: give it back.
+	if s.closed {
+		if s.streamGone != nil {
+			s.streamGone()
+		}
+		return nil
+	}
 	s.streams[id] = st
 	s.rr = append(s.rr, id)
 	if s.acceptFn != nil {

@@ -254,6 +254,7 @@ func TestPublicOnly(t *testing.T) {
 		"[::127.0.0.1]:80": false, "[2606:4700::1111%eth0]:443": false, "[64:ff9b::7f00:1%lo0]:80": false, "[::ffff:0:7f00:1]:80": false, "[64:ff9b::808:808]:443": true, "[2002:808:808::]:443": true,
 		"192.0.2.1:443": false, "198.51.100.9:80": false, "203.0.113.5:443": false,
 		"8.8.8.8:443": true, "[2606:4700::1111]:443": true,
+		"192.88.99.1:443": false, "[2001:20::1]:443": false, "[3fff::1]:443": false,
 	} {
 		if err := PublicOnly("tcp", addr, nil); (err == nil) != ok {
 			t.Errorf("%s: allowed=%v, want %v", addr, err == nil, ok)
@@ -1197,7 +1198,7 @@ func TestHeldPollsAreNotLost(t *testing.T) {
 // exactly which queries the server sees. It returns functions to send a query, collect the
 // answers that arrive within a duration, and seal the next upstream packet (hold 500 ms), and
 // the address of an origin the server can reach.
-func rawSession(t *testing.T) (send func(uint16, []byte), recv func(time.Duration) []*answer, packet func([]byte) []byte, origin string) {
+func rawSession(t *testing.T) (send func(uint16, []byte), recv func(time.Duration) []*answer, packet func([]byte) []byte, origin string, down *packetCipher) {
 	t.Helper()
 	srv, pub := startServer(t)
 	origin = startOrigin(t)
@@ -1232,7 +1233,7 @@ func rawSession(t *testing.T) (send func(uint16, []byte), recv func(time.Duratio
 	if len(hello) == 0 {
 		t.Fatal("no hello reply")
 	}
-	sid, up, _, err := clientFinish(pub, eph, hello[0].txt)
+	sid, up, down, err := clientFinish(pub, eph, hello[0].txt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1250,13 +1251,13 @@ func rawSession(t *testing.T) (send func(uint16, []byte), recv func(time.Duratio
 		m := up.mask(sealed)
 		return append([]byte{hdr[0], hdr[1], hdr[2] ^ m[0], hdr[3] ^ m[1]}, sealed...)
 	}
-	return send, recv, packet, origin
+	return send, recv, packet, origin, down
 }
 
 // A resolver's retry of a query that carried data is a duplicate packet. The server doesn't
 // reapply it, but must still answer it at once, as it did the original, not hold it like a poll.
 func TestDuplicateDataQueryAnsweredAtOnce(t *testing.T) {
-	send, recv, packet, origin := rawSession(t)
+	send, recv, packet, origin, _ := rawSession(t)
 	open := append([]byte{byte(len(origin))}, origin...)
 	data := packet(appendStream(nil, 0, 0, open, false, false)) // pn 0: opens a stream
 	send(2, data)
@@ -1269,7 +1270,7 @@ func TestDuplicateDataQueryAnsweredAtOnce(t *testing.T) {
 }
 
 func TestHeldPollsReleasedOldestFirst(t *testing.T) {
-	send, recv, packet, origin := rawSession(t)
+	send, recv, packet, origin, _ := rawSession(t)
 	open := append([]byte{byte(len(origin))}, origin...)
 	open = append(open, "echo\n"...)
 	send(2, packet(appendStream(nil, 0, 0, open, false, false))) // pn 0: opens the stream
@@ -1293,5 +1294,102 @@ func TestHeldPollsReleasedOldestFirst(t *testing.T) {
 			txns = append(txns, a.txn)
 		}
 		t.Fatalf("answers %v: the poll held first (txn 6) must be answered before the later one (txn 7)", txns)
+	}
+}
+
+// A stream whose destination prefix is malformed is refused with RESET_STREAM code 1, so a client
+// waiting for OPENED gets an answer; a graceful close would leave it waiting forever.
+func TestMalformedDestinationIsRefused(t *testing.T) {
+	send, recv, packet, _, down := rawSession(t)
+	upPN := uint64(0)
+	largest, have := uint64(0), false
+	frames := appendStream(nil, 0, 0, []byte{0}, false, false) // a zero-length destination
+	for i := range 8 {
+		send(uint16(10+i), packet(frames))
+		frames = []byte{frPing}
+		for _, a := range recv(700 * time.Millisecond) {
+			pn, plain, err := down.openDown(a.txt, upPN, func(tr uint16) uint64 { return decodePN(largest, have, tr) })
+			if err != nil {
+				continue
+			}
+			largest, have = max(largest, pn), true
+			found := false
+			parseFrames(plain[2:], func(f *frame) error {
+				if f.typ == frReset && f.id == 0 {
+					if f.val != 1 {
+						t.Fatalf("reset code %d, want 1 (refused as unreachable)", f.val)
+					}
+					found = true
+				}
+				return nil
+			})
+			if found {
+				return
+			}
+		}
+		upPN++
+	}
+	t.Fatal("the server never refused the malformed stream")
+}
+
+// Closing a stream whose data is acked but whose FIN isn't must still deliver the FIN, not a
+// RESET that would abort the stream at the server and lose the request.
+func TestCloseAfterDataAckedStillSendsFin(t *testing.T) {
+	cfg := streamConfig{StreamWindow: 1 << 16, SendBuffer: 1 << 16, MaxStreams: 4}
+	c, s := newSession(true, cfg, nil, nil), newSession(false, cfg, nil, nil)
+	now := time.Now()
+	c.mu.Lock()
+	st, _ := c.openStream()
+	st.sbuf = append(st.sbuf, "\x03a:1request"...)
+	st.spending.add(0, uint64(len(st.sbuf)))
+	pn, b, _, _ := c.build(nil, 1000, now, 0)
+	c.acked(c.sent[pn]) // the data is acknowledged; the FIN isn't sent yet
+	c.mu.Unlock()
+	s.receive(pn, b, now)
+	(&Conn{st: st}).Close()
+	c.mu.Lock()
+	pn, b, _, _ = c.build(nil, 1000, now, 0)
+	c.mu.Unlock()
+	s.receive(pn, b, now)
+	if ss := s.streams[0]; ss == nil || !ss.rfin || ss.reset {
+		t.Fatal("the server got a RESET instead of the FIN")
+	}
+}
+
+// A control queue that overflows ends the session rather than silently dropping frames that
+// callers already counted as sent, and the removed stream's slot is given back only once.
+func TestControlQueueOverflow(t *testing.T) {
+	cfg := streamConfig{StreamWindow: 1 << 16, SendBuffer: 1 << 16, MaxStreams: 4}
+	now := time.Now()
+	s := newSession(false, cfg, nil, nil)
+	for id := range uint64(2000) {
+		s.receive(id, appendStream(nil, id, 0, []byte("x"), false, false), now)
+		if s.closed {
+			break
+		}
+	}
+	if !s.closed {
+		t.Fatal("the full queue dropped frames instead of ending the session")
+	}
+
+	// Slot accounting: one stream holds a slot, plus one held by another session.
+	s = newSession(false, cfg, nil, nil)
+	slots := int64(1)
+	s.acceptFn = func(st *stream) bool {
+		if st == nil {
+			slots++
+		}
+		return true
+	}
+	s.streamGone = func() { slots-- }
+	s.receive(0, appendStream(nil, 0, 0, []byte("x"), false, false), now)
+	for len(s.ctrlQ) < maxCtrlQueue {
+		s.ctrlQ = append(s.ctrlQ, ctrl{typ: frOpened, id: uint64(100 + len(s.ctrlQ))})
+	}
+	st := s.streams[0]
+	st.rclosed, st.saborted, st.serving = true, true, false
+	s.maybeRemove(st) // its RESET overflows the queue and ends the session
+	if !s.closed || slots != 1 {
+		t.Fatalf("closed=%v slots=%d, want closed with 1 (the other session's)", s.closed, slots)
 	}
 }

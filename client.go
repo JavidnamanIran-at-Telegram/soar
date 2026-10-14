@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"slices"
 	"sync"
 	"time"
 )
@@ -30,7 +31,8 @@ type Config struct {
 	SafeQName, MaxQName int
 	// Hold is how long the server may hold an idle poll. Default 500ms.
 	Hold time.Duration
-	// MaxInflight caps queries outstanding across all paths. Default 128.
+	// MaxInflight caps queries outstanding across all paths. Default 128; at most 1,024, which
+	// keeps pending queries well inside the DNS ID space.
 	MaxInflight int
 	// MaxPathWindow caps one path's queries outstanding. Default 32.
 	MaxPathWindow int
@@ -40,7 +42,7 @@ type Config struct {
 	MaxAnswer    int
 	StreamWindow uint64 // per-stream receive window. Default 256 KiB.
 	SendBuffer   int    // per-stream send buffer. Default 64 KiB.
-	MaxStreams   int    // Default 64.
+	MaxStreams   int    // Default 64; at most 256, so stream control frames fit the session's queue.
 	// TCP controls TCP/53 paths: "auto" (default) adds one for a resolver whose UDP path never
 	// answers, "on" adds one for every resolver up front, "only" uses TCP alone, "off" never
 	// (except for resolvers StreamOnly reports).
@@ -81,6 +83,7 @@ func (c *Config) setDefaults() {
 	if c.MaxInflight <= 0 {
 		c.MaxInflight = 128
 	}
+	c.MaxInflight = min(c.MaxInflight, maxInflightCap)
 	if c.MaxPathWindow <= 0 {
 		c.MaxPathWindow = 32
 	}
@@ -93,6 +96,7 @@ func (c *Config) setDefaults() {
 	if c.MaxStreams <= 0 {
 		c.MaxStreams = 64
 	}
+	c.MaxStreams = min(c.MaxStreams, maxStreamsCap)
 	if c.Logger == nil {
 		c.Logger = slog.New(slog.DiscardHandler)
 	}
@@ -111,6 +115,13 @@ func (c *Config) setDefaults() {
 }
 
 const (
+	// maxInflightCap caps MaxInflight whatever it's set to. With expired queries kept for
+	// lateGrace too, pending queries stay far below the 65,536 DNS IDs.
+	maxInflightCap = 1024
+	// maxPending is a hard ceiling on pending queries (live and expired), so a free DNS ID
+	// always exists and newTxnLocked's random pick always terminates.
+	maxPending = 60000
+
 	limitClasses  = 16 // answer limit = 512 + 48*class
 	outcomeWindow = 20
 	lateGrace     = 3 * time.Second
@@ -464,6 +475,13 @@ func (c *Client) nextDeadlineLocked(now time.Time) time.Duration {
 	for _, p := range c.paths {
 		if p.suspended.After(now) && p.suspended.Before(next) {
 			next = p.suspended
+		}
+	}
+	// Discovery adds one candidate per pass: wake when the pace allows the next, or on a
+	// network where nothing answers it would decay to this one-second default.
+	if c.wantsCandidateLocked(now) {
+		if t := c.lastCand.Add(c.cfg.Discovery.Pace); t.Before(next) {
+			next = t
 		}
 	}
 	return max(next.Sub(now), time.Millisecond)
@@ -820,7 +838,7 @@ func (cs *clientSession) wantQueries() int {
 
 func (c *Client) fillLocked(now time.Time) {
 	cs := c.sess
-	if cs == nil {
+	if cs == nil || len(c.pending) >= maxPending {
 		return
 	}
 	if !cs.established {
@@ -840,7 +858,7 @@ func (c *Client) fillLocked(now time.Time) {
 		if !busy {
 			break
 		}
-		if c.liveQueriesLocked() >= c.cfg.MaxInflight {
+		if c.liveQueriesLocked() >= c.cfg.MaxInflight || len(c.pending) >= maxPending {
 			break
 		}
 		if !p.verified && p.inflight == 0 && p.usable(now) {
@@ -857,7 +875,7 @@ func (c *Client) fillLocked(now time.Time) {
 				}
 			}
 		}
-		if inflight >= c.cfg.MaxInflight {
+		if inflight >= c.cfg.MaxInflight || len(c.pending) >= maxPending {
 			return
 		}
 		cs.mu.Lock()
@@ -923,8 +941,12 @@ func (c *Client) sendHellosLocked(cs *clientSession, now time.Time) {
 	payload := make([]byte, 2, 2+pubLen)
 	payload = append(payload, cs.eph.PublicKey().Bytes()...)
 	sent := 0
-	for _, p := range c.paths {
-		if sent >= maxHelloPaths || c.liveQueriesLocked() >= c.cfg.MaxInflight {
+	// Least recently tried first (never-tried paths before all), so with more resolvers than
+	// maxHelloPaths the retries rotate through all of them.
+	order := slices.Clone(c.paths)
+	slices.SortStableFunc(order, func(a, b *path) int { return a.lastHello.Compare(b.lastHello) })
+	for _, p := range order {
+		if sent >= maxHelloPaths || c.liveQueriesLocked() >= c.cfg.MaxInflight || len(c.pending) >= maxPending {
 			break
 		}
 		if !p.usable(now) || p.inflight > 0 || now.Sub(p.lastHello) < helloRetry {
@@ -937,6 +959,12 @@ func (c *Client) sendHellosLocked(cs *clientSession, now time.Time) {
 }
 
 func (c *Client) sendDataLocked(cs *clientSession, p *path, now time.Time, allowDup bool) {
+	// Checked here, before a packet is built, so every data send (fill, probes of unverified
+	// paths, the tail copy) respects the ceiling; a packet built but never sent would sit in
+	// the session's sent map with no query to fail it.
+	if len(c.pending) >= maxPending {
+		return
+	}
 	nameLen := p.nameLen
 	probe := false
 	if !p.probing && p.successes >= 3 && p.nameLen < c.cfg.MaxQName && p.probeFails < 2 {
@@ -978,7 +1006,7 @@ func (c *Client) sendDataLocked(cs *clientSession, p *path, now time.Time, allow
 		if p2 == nil || !p2.verified {
 			p2 = c.pickPathLocked(now, nil)
 		}
-		if p2 != nil && p2.verified {
+		if p2 != nil && p2.verified && c.liveQueriesLocked() < c.cfg.MaxInflight {
 			cs.mu.Lock()
 			ok := cs.requeue(pkt)
 			cs.mu.Unlock()
@@ -1098,6 +1126,15 @@ func (c *Client) onAnswer(msg []byte) {
 	}
 	delete(c.pending, a.txn)
 	cs.lastAuth, cs.unanswered = now, time.Time{}
+	// The liveness clock runs from the first query since the last authenticated answer. With
+	// other queries still out it restarts now rather than stopping: if every path then goes
+	// dead, nothing new is sent to restart it, and the session must still be presumed lost.
+	for _, o := range c.pending {
+		if !o.expired && !o.hello && o.sess == cs {
+			cs.unanswered = now
+			break
+		}
+	}
 	p.maxAnswered = max(p.maxAnswered, q.seq+1)
 	if q.poll {
 		p.maxPollAnswered = max(p.maxPollAnswered, q.seq+1)

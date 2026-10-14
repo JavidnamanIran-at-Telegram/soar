@@ -35,7 +35,9 @@ type Discovery struct {
 	// lists are exhausted. Off by default: probing many in-country addresses from a user's device
 	// is a visible pattern, so enable it deliberately.
 	SampleRanges int
-	// Want stops adding candidates once this many paths are verified. Default 16.
+	// Want stops adding candidates once this many paths are healthy: verified and working now.
+	// A verified path that's unusable or on a run of losses doesn't count, so discovery resumes
+	// when resolvers that worked get blocked. Default 16.
 	Want int
 	// Concurrency bounds unverified candidates being probed at once. Default 16.
 	Concurrency int
@@ -201,19 +203,46 @@ func (c *Client) storeCache(cache ResolverCache) {
 	}
 }
 
-// discoverLocked adds candidate paths at the configured pace while too few paths are verified,
+// healthy reports a verified path that works now. A path on a run of losses isn't healthy even
+// when it's usable: the client never suspends its last usable path, so that one stays usable
+// while failing, and counting it would keep discovery from finding a replacement.
+func (p *path) healthy(now time.Time) bool {
+	return p.verified && p.usable(now) && p.consec < 5
+}
+
+// wantsCandidateLocked reports whether discovery has candidates left and room to probe one.
+func (c *Client) wantsCandidateLocked(now time.Time) bool {
+	d := &c.cfg.Discovery
+	if !d.Enabled || c.candIdx >= len(c.cands) {
+		return false
+	}
+	healthy, probing := 0, 0
+	for _, p := range c.paths {
+		if p.healthy(now) {
+			healthy++
+		} else if !p.verified && p.candidate {
+			probing++
+		}
+	}
+	return healthy < d.Want && probing < d.Concurrency
+}
+
+// discoverLocked adds candidate paths at the configured pace while too few paths are healthy,
 // and prunes candidates that failed without ever answering.
 func (c *Client) discoverLocked(now time.Time) {
 	d := &c.cfg.Discovery
 	if !d.Enabled {
 		return
 	}
-	verified, probing := 0, 0
+	verified, healthy, probing := 0, 0, 0
 	kept := c.paths[:0]
 	for _, p := range c.paths {
 		switch {
 		case p.verified:
 			verified++
+			if p.healthy(now) {
+				healthy++
+			}
 		case p.candidate && (p.outN >= 3 && p.inflight == 0 || p.tcp != nil && now.Sub(p.created) > 10*time.Second):
 			if p.tcp != nil {
 				p.tcp.stop()
@@ -244,7 +273,7 @@ func (c *Client) discoverLocked(now time.Time) {
 		}
 		c.cacheQ <- good
 	}
-	if verified >= d.Want || probing >= d.Concurrency || now.Sub(c.lastCand) < d.Pace {
+	if healthy >= d.Want || probing >= d.Concurrency || now.Sub(c.lastCand) < d.Pace {
 		return
 	}
 	for c.candIdx < len(c.cands) {
