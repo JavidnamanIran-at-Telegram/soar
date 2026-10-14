@@ -131,7 +131,11 @@ func (s *session) queueCtrl(c ctrl) {
 
 const (
 	maxCtrlQueue = 1024
-	replayWindow = 1 << 14
+	// maxStreamsCap caps MaxStreams, client and server alike. A stream queues at most three
+	// control frames (a window grant, OPENED, RESET), so this many streams fit the control
+	// queue with room to spare, and only a misbehaving peer can overflow it.
+	maxStreamsCap = maxCtrlQueue / 4
+	replayWindow  = 1 << 14
 )
 
 // openStream creates a client stream. Caller holds s.mu.

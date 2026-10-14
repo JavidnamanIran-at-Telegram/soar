@@ -95,6 +95,7 @@ func (c *Config) setDefaults() {
 	if c.MaxStreams <= 0 {
 		c.MaxStreams = 64
 	}
+	c.MaxStreams = min(c.MaxStreams, maxStreamsCap)
 	if c.Logger == nil {
 		c.Logger = slog.New(slog.DiscardHandler)
 	}

@@ -147,3 +147,85 @@ func TestDiscoveryPaceSchedulesAWakeup(t *testing.T) {
 		t.Fatalf("next wakeup in %v, want within the %v pace", d, c.cfg.Discovery.Pace)
 	}
 }
+
+// MaxStreams is capped so that legitimate streams can't overflow the control queue.
+func TestMaxStreamsCapped(t *testing.T) {
+	c := gapClient(t, Config{Resolvers: []string{"192.0.2.1:53"}, TCP: "off", MaxStreams: 100_000})
+	if c.cfg.MaxStreams != maxStreamsCap {
+		t.Fatalf("client MaxStreams %d, want %d", c.cfg.MaxStreams, maxStreamsCap)
+	}
+	sc := ServerConfig{MaxStreams: 100_000}
+	sc.setDefaults()
+	if sc.MaxStreams != maxStreamsCap {
+		t.Fatalf("server MaxStreams %d, want %d", sc.MaxStreams, maxStreamsCap)
+	}
+	if 3*maxStreamsCap >= maxCtrlQueue {
+		t.Fatal("capped streams could still fill the control queue")
+	}
+}
+
+// An authenticated answer restarts the liveness clock while other queries are still out, so if
+// every path then dies the session is still presumed lost.
+func TestLivenessClockRestartsWithQueriesOut(t *testing.T) {
+	c := gapClient(t, Config{Resolvers: []string{"192.0.2.1:53", "192.0.2.2:53"}, TCP: "off"})
+	c.mu.Lock()
+	for _, p := range c.paths {
+		p.verified = true
+	}
+	cs := establish(c)
+	cs.mu.Lock()
+	st, _ := cs.openStream()
+	st.sbuf = append(st.sbuf, "\x03a:1"...)
+	st.spending.add(0, uint64(len(st.sbuf)))
+	cs.mu.Unlock()
+	now := time.Now()
+	c.fillLocked(now)
+	var q *pendingQuery
+	for _, p := range c.pending {
+		if !p.hello {
+			q = p
+			break
+		}
+	}
+	if q == nil || len(c.pending) < 2 {
+		c.mu.Unlock()
+		t.Fatalf("want two queries out, have %d", len(c.pending))
+	}
+	c.mu.Unlock()
+	// The server's answer to one of them, sealed with the session's (zero) keys.
+	plain := []byte{0, 0, frPing, 0, 0, 0}
+	payload := (&packetCipher{}).sealDown(0, q.pn, plain)
+	c.onAnswer(appendAnswer(nil, &query{txn: q.txn, question: q.question, qtype: typeTXT}, rcodeOK, payload))
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if cs.unanswered.IsZero() {
+		t.Fatal("the liveness clock stopped with a query still out")
+	}
+	c.checkLivenessLocked(time.Now().Add(deadSessionAfter + time.Second))
+	if !cs.isClosed() {
+		t.Fatal("the session wasn't presumed lost")
+	}
+}
+
+// When advertising a new peer stream overflows the control queue and ends the session, the
+// slot acceptFn reserved for it is given back exactly once.
+func TestPeerStreamReturnsReservedSlotOnOverflow(t *testing.T) {
+	cfg := streamConfig{StreamWindow: 1 << 16, SendBuffer: 1 << 16, MaxStreams: 4}
+	s := newSession(false, cfg, nil, nil)
+	slots := int64(1) // another session's stream
+	s.acceptFn = func(st *stream) bool {
+		if st == nil {
+			slots++
+		}
+		return true
+	}
+	s.streamGone = func() { slots-- }
+	for len(s.ctrlQ) < maxCtrlQueue {
+		s.ctrlQ = append(s.ctrlQ, ctrl{typ: frOpened, id: uint64(100 + len(s.ctrlQ))})
+	}
+	// A new stream: acceptFn reserves a slot, then its window grant overflows the queue.
+	s.receive(0, appendStream(nil, 0, 0, []byte("x"), false, false), time.Now())
+	if !s.closed || slots != 1 {
+		t.Fatalf("closed=%v slots=%d, want closed with 1 (the other session's)", s.closed, slots)
+	}
+}
