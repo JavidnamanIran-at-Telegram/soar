@@ -624,7 +624,15 @@ func (ss *srvSession) serveStream(st *stream) {
 	dbg("srv stream %d addr=%q err=%v", st.id, addr, err)
 	c.SetReadDeadline(time.Time{})
 	if err != nil {
-		c.Close()
+		// No usable destination (malformed, or none in 30 s): refuse the stream as unreachable.
+		// A graceful close ends in a FIN and then a "stop sending" RESET, which tells a client
+		// waiting for OPENED nothing, so it would wait forever.
+		ss.mu.Lock()
+		ss.queueCtrl(ctrl{typ: frReset, id: st.id, val: 1})
+		st.abort(errors.New("soar: bad destination"))
+		ss.maybeRemove(st)
+		ss.mu.Unlock()
+		ss.flush()
 		return
 	}
 	// A stream the client aborted is never dialed, and an abort cancels a pending dial. A RESET
@@ -797,6 +805,7 @@ var nonPublic = []netip.Prefix{
 	netip.MustParsePrefix("100.64.0.0/10"),   // CGNAT
 	netip.MustParsePrefix("192.0.0.0/24"),    // IETF protocol assignments
 	netip.MustParsePrefix("198.18.0.0/15"),   // benchmarking
+	netip.MustParsePrefix("192.88.99.0/24"),  // 6to4 relay anycast (RFC 7526)
 	netip.MustParsePrefix("192.0.2.0/24"),    // TEST-NET-1 (RFC 5737)
 	netip.MustParsePrefix("198.51.100.0/24"), // TEST-NET-2
 	netip.MustParsePrefix("203.0.113.0/24"),  // TEST-NET-3
@@ -810,6 +819,8 @@ var nonPublic = []netip.Prefix{
 	netip.MustParsePrefix("2001:db8::/32"),   // documentation
 	netip.MustParsePrefix("2001:2::/48"),     // benchmarking
 	netip.MustParsePrefix("2001:10::/28"),    // ORCHID
+	netip.MustParsePrefix("2001:20::/28"),    // ORCHIDv2
+	netip.MustParsePrefix("3fff::/20"),       // documentation (RFC 9637)
 }
 
 func isPublic(a netip.Addr) bool {

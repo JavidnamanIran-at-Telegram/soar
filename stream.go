@@ -386,8 +386,11 @@ func (c *Conn) Close() error {
 	if !st.doneReceiving() {
 		st.rclosed = true
 		st.rbuf, st.rooo, st.rgot = nil, nil, nil
-		// Ask the peer to stop sending; our own data is unaffected unless already done.
-		if st.doneSending() || len(st.sbuf) == 0 {
+		// Ask the peer to stop sending, but only once our FIN is acknowledged: a RESET before
+		// the peer has the FIN aborts the stream there, and data already written would be lost.
+		// An empty sbuf only means the data was acked, not the FIN. Until then the FIN goes
+		// out, and maybeRemove sends the RESET when the stream is done.
+		if st.doneSending() {
 			s.queueCtrl(ctrl{typ: frReset, id: st.id})
 			st.abort(net.ErrClosed)
 		}
