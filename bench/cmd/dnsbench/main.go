@@ -34,6 +34,7 @@ func main() {
 		all = append(all,
 			&contenders.Dnstt{Server: R + "/bin/dnstt-server", Client: R + "/bin/dnstt-client"},
 			&contenders.VayDNS{Server: R + "/bin/vaydns-server", Client: R + "/bin/vaydns-client"},
+			&contenders.SoarRS{Server: R + "/soar-rs/target/release/soar-server", Client: R + "/soar-rs/target/release/soar-client"},
 			&contenders.SlipstreamRust{Server: R + "/slipstream-rust/target/release/slipstream-server", Client: R + "/slipstream-rust/target/release/slipstream-client"},
 			&contenders.SlipstreamC{Server: R + "/slipstream/build/slipstream-server", Client: R + "/slipstream/build/slipstream-client",
 				Cert: R + "/slipstream/certs/cert.pem", Key: R + "/slipstream/certs/key.pem"},
