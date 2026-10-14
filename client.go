@@ -858,7 +858,7 @@ func (c *Client) fillLocked(now time.Time) {
 		if !busy {
 			break
 		}
-		if c.liveQueriesLocked() >= c.cfg.MaxInflight {
+		if c.liveQueriesLocked() >= c.cfg.MaxInflight || len(c.pending) >= maxPending {
 			break
 		}
 		if !p.verified && p.inflight == 0 && p.usable(now) {
@@ -946,7 +946,7 @@ func (c *Client) sendHellosLocked(cs *clientSession, now time.Time) {
 	order := slices.Clone(c.paths)
 	slices.SortStableFunc(order, func(a, b *path) int { return a.lastHello.Compare(b.lastHello) })
 	for _, p := range order {
-		if sent >= maxHelloPaths || c.liveQueriesLocked() >= c.cfg.MaxInflight {
+		if sent >= maxHelloPaths || c.liveQueriesLocked() >= c.cfg.MaxInflight || len(c.pending) >= maxPending {
 			break
 		}
 		if !p.usable(now) || p.inflight > 0 || now.Sub(p.lastHello) < helloRetry {
@@ -959,6 +959,12 @@ func (c *Client) sendHellosLocked(cs *clientSession, now time.Time) {
 }
 
 func (c *Client) sendDataLocked(cs *clientSession, p *path, now time.Time, allowDup bool) {
+	// Checked here, before a packet is built, so every data send (fill, probes of unverified
+	// paths, the tail copy) respects the ceiling; a packet built but never sent would sit in
+	// the session's sent map with no query to fail it.
+	if len(c.pending) >= maxPending {
+		return
+	}
 	nameLen := p.nameLen
 	probe := false
 	if !p.probing && p.successes >= 3 && p.nameLen < c.cfg.MaxQName && p.probeFails < 2 {

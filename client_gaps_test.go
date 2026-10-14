@@ -229,3 +229,24 @@ func TestPeerStreamReturnsReservedSlotOnOverflow(t *testing.T) {
 		t.Fatalf("closed=%v slots=%d, want closed with 1 (the other session's)", s.closed, slots)
 	}
 }
+
+// maxPending holds at every send path: hellos to many resolvers, starting one below the ceiling,
+// stop at it.
+func TestMaxPendingHoldsForHellos(t *testing.T) {
+	var resolvers []string
+	for i := 1; i <= 20; i++ {
+		resolvers = append(resolvers, fmt.Sprintf("192.0.2.%d:53", i))
+	}
+	c := gapClient(t, Config{Resolvers: resolvers, TCP: "off"})
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	for txn := range maxPending - 1 {
+		c.pending[uint16(txn)] = &pendingQuery{p: c.paths[0], expired: true, deadline: now.Add(time.Minute)}
+	}
+	eph, _ := ecdh.X25519().GenerateKey(rand.Reader)
+	c.sendHellosLocked(&clientSession{eph: eph, ready: make(chan struct{})}, now)
+	if len(c.pending) > maxPending {
+		t.Fatalf("%d pending, past the %d ceiling", len(c.pending), maxPending)
+	}
+}
