@@ -109,6 +109,31 @@ func TestTailCopyRespectsMaxInflight(t *testing.T) {
 	}
 }
 
+// One below maxPending, the request's first copy takes the last slot and the tail copy must
+// not go past it.
+func TestTailCopyRespectsMaxPending(t *testing.T) {
+	c := gapClient(t, Config{Resolvers: []string{"192.0.2.1:53", "192.0.2.2:53"}, TCP: "off"})
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, p := range c.paths {
+		p.verified = true
+	}
+	now := time.Now()
+	for txn := range maxPending - 1 {
+		c.pending[uint16(txn)] = &pendingQuery{p: c.paths[0], expired: true, deadline: now.Add(time.Minute)}
+	}
+	cs := establish(c)
+	cs.mu.Lock()
+	st, _ := cs.openStream()
+	st.sbuf = append(st.sbuf, "\x03a:1GET"...)
+	st.spending.add(0, uint64(len(st.sbuf)))
+	cs.mu.Unlock()
+	c.fillLocked(now)
+	if n := len(c.pending); n != maxPending {
+		t.Fatalf("%d pending, want exactly the %d ceiling", n, maxPending)
+	}
+}
+
 // MaxInflight is capped, and once the DNS ID space is nearly full nothing more is sent, so
 // newTxnLocked always finds a free ID.
 func TestDNSIDSpaceStaysBounded(t *testing.T) {
