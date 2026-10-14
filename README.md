@@ -3,7 +3,9 @@
 **Soar is a DNS tunnel built to be the fastest and most reliable way through networks that censor
 everything except DNS.**
 
-Website: **[soar.lantern.io](https://soar.lantern.io)**, with how it works and benchmarks. Soar is the
+Website: **[soar.lantern.io](https://soar.lantern.io)**, with how it works and benchmarks (source in
+[getlantern/soar-site](https://github.com/getlantern/soar-site)). A wire-compatible Rust client and
+server live in [getlantern/soar-rs](https://github.com/getlantern/soar-rs). Soar is the
 last-resort transport in [kindling](https://kindling.lantern.io), from the [Lantern](https://lantern.io) team.
 
 The name comes from the root of every DNS zone: the **SOA** record, *Start of Authority*. Each zone
@@ -59,7 +61,8 @@ what censors and resolvers actually do (see [Benchmarks](#benchmarks)).
 ### Wire format
 
 The full specification is [SPEC.md](SPEC.md), with test vectors in
-[testdata/vectors.json](testdata/vectors.json) for other implementations. In outline:
+[testdata/vectors.json](testdata/vectors.json) for other implementations, such as
+[soar-rs](https://github.com/getlantern/soar-rs). In outline:
 
 Upstream, in the query name under the zone (lower-case base32):
 
