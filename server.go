@@ -47,7 +47,7 @@ type ServerConfig struct {
 	// MaxStreams caps streams per session. Default 128; at most 256, so stream control frames
 	// fit the session's queue.
 	MaxStreams int
-	Logger            *slog.Logger
+	Logger     *slog.Logger
 }
 
 func (c *ServerConfig) setDefaults() {
