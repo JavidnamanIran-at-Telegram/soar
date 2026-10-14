@@ -429,18 +429,11 @@ func (s *Server) forgetHelloLocked(sid uint16) {
 // onQuery handles a data query: it applies the client's packet, then answers now or holds the
 // query until there's data to send.
 func (ss *srvSession) onQuery(q *query, addr net.Addr, p []byte) {
-	sealed := p[4:]
-	m := ss.open.mask(sealed)
-	var hdr [4]byte
-	copy(hdr[:], p[:4])
-	hdr[2] ^= m[0]
-	hdr[3] ^= m[1]
-	trunc := binary.BigEndian.Uint16(hdr[2:])
 	now := time.Now()
-
 	ss.mu.Lock()
-	pn := decodePN(ss.largestRecv, ss.haveRecv, trunc)
-	plain, err := ss.open.open(hdr[:], sealed, pn)
+	pn, plain, err := ss.open.openUp(p, func(trunc uint16) uint64 {
+		return decodePN(ss.largestRecv, ss.haveRecv, trunc)
+	})
 	if err != nil || len(plain) < 1 {
 		ss.mu.Unlock()
 		ss.srv.noData(q, addr)
@@ -464,9 +457,13 @@ func (ss *srvSession) onQuery(q *query, addr net.Addr, p []byte) {
 	var out []sendItem
 	if ss.abandoned.contains(pn) {
 		out = append(out, ss.emptyAnswerLocked(hq, now))
-	} else if ss.closed || hold == 0 || ss.rxData || ss.hasData() {
+	} else if ss.closed || hold == 0 || ss.rxData {
 		out = append(out, ss.answerLocked(hq, now))
 	} else {
+		// A poll joins the queue even when there's data to send: the drain below answers the
+		// queue oldest first, at once. Releasing polls in arrival order is what lets the client
+		// tell a lost poll from a held one; answering this one first would leave older polls
+		// looking lost.
 		ss.held = append(ss.held, hq)
 		hq.timer = time.AfterFunc(hold, func() { ss.expire(hq) })
 		// Bound held queries per session; answer the oldest.
@@ -573,13 +570,7 @@ func (ss *srvSession) answerPktLocked(hq *heldQuery, now time.Time) (sendItem, *
 		plain[1] = byte(min(ss.pendingBytes()/budget, 255))
 	}
 	dbg("srv answer pn=%d up=%d plain=%x", pn, hq.upPN, plain)
-	var hdr [2]byte
-	binary.BigEndian.PutUint16(hdr[:], uint16(pn))
-	sealed := ss.seal.seal(nil, downAD(hdr, hq.upPN), plain, pn)
-	m := ss.seal.mask(sealed)
-	payload := make([]byte, 0, 2+len(sealed))
-	payload = append(payload, hdr[0]^m[0], hdr[1]^m[1])
-	payload = append(payload, sealed...)
+	payload := ss.seal.sealDown(pn, hq.upPN, plain)
 	return sendItem{msg: appendAnswer(make([]byte, 0, hq.limit), hq.q, rcodeOK, payload), addr: hq.addr, qsize: hq.q.size}, pkt
 }
 
@@ -588,12 +579,7 @@ func (ss *srvSession) emptyAnswerLocked(hq *heldQuery, now time.Time) sendItem {
 	hq.finish()
 	pn := ss.nextPN
 	ss.nextPN++
-	plain := make([]byte, 2+minPlain)
-	var hdr [2]byte
-	binary.BigEndian.PutUint16(hdr[:], uint16(pn))
-	sealed := ss.seal.seal(nil, downAD(hdr, hq.upPN), plain, pn)
-	m := ss.seal.mask(sealed)
-	payload := append([]byte{hdr[0] ^ m[0], hdr[1] ^ m[1]}, sealed...)
+	payload := ss.seal.sealDown(pn, hq.upPN, make([]byte, 2+minPlain))
 	return sendItem{msg: appendAnswer(make([]byte, 0, 128), hq.q, rcodeOK, payload), addr: hq.addr, qsize: hq.q.size}
 }
 

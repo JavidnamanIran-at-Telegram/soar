@@ -201,6 +201,14 @@ func decodePN(largest uint64, have bool, trunc uint16) uint64 {
 func (s *session) receive(pn uint64, frames []byte, now time.Time) (bool, error) {
 	// recvd only remembers the last replayWindow pns, so anything older is refused outright.
 	if s.recvd.contains(pn) || (s.haveRecv && pn+replayWindow < s.largestRecv) {
+		// A duplicate (a resolver's retry) isn't reapplied, but its frames still say whether it
+		// carried data, which decides whether the server may hold it (SPEC §7.2).
+		parseFrames(frames, func(f *frame) error {
+			if f.typ != frAck && f.typ != frLost && f.typ != frPing {
+				s.rxData = true
+			}
+			return nil
+		})
 		return false, nil
 	}
 	s.recvd.add(pn, pn+1)

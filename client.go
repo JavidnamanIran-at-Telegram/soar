@@ -187,6 +187,10 @@ type path struct {
 	lastSuccess time.Time
 	nextSeq     uint64
 	maxAnswered uint64 // highest seq answered + 1
+	// maxPollAnswered is the highest seq of a poll answered + 1. The server releases held polls
+	// in the order they arrived, so a poll overtaken by later polls is lost, while one overtaken
+	// by data queries, which the server answers at once, may just be held.
+	maxPollAnswered uint64
 }
 
 type pendingQuery struct {
@@ -202,9 +206,12 @@ type pendingQuery struct {
 	expired  bool
 	seq      uint64 // per-path send order
 	scout    bool   // carries no data: a hello or a probe of an unverified path
-	errRcode int    // an error answer arrived (-1: none); it may be forged, so we keep waiting
-	errTC    bool   // that answer was truncated
-	class    int    // the answer-size class this query asked for
+	// poll: carries no stream or control frames, so the server may hold it (SPEC §7.2) while
+	// it answers later data queries at once.
+	poll     bool
+	errRcode int  // an error answer arrived (-1: none); it may be forged, so we keep waiting
+	errTC    bool // that answer was truncated
+	class    int  // the answer-size class this query asked for
 }
 
 type clientSession struct {
@@ -720,8 +727,17 @@ func (c *Client) expireLocked(now time.Time) {
 			}
 			continue
 		}
-		// Packet threshold: three later queries on this path were answered.
-		early := q.p.hasRTT && q.p.maxAnswered >= q.seq+4 && now.Sub(q.sent) > q.p.srtt+2*q.p.rttvar
+		// Packet threshold: a query sent three or more queries later on this path was answered.
+		// For a poll, that later query must itself be a poll: the server answers data queries at
+		// once while it holds polls, so being overtaken by those is no sign of loss, but it
+		// releases held polls in arrival order, so a later poll answered first means this one
+		// was lost. (seq counts every query, so with data queries in between this can be the
+		// very next poll; the srtt+2*rttvar margin still allows for reordering.)
+		answered := q.p.maxAnswered
+		if q.poll {
+			answered = q.p.maxPollAnswered
+		}
+		early := q.p.hasRTT && answered >= q.seq+4 && now.Sub(q.sent) > q.p.srtt+2*q.p.rttvar
 		if now.Before(q.deadline) && !early {
 			continue
 		}
@@ -943,16 +959,9 @@ func (c *Client) sendDataLocked(cs *clientSession, p *path, now time.Time, allow
 		}
 	}
 	dup := allowDup && pkt != nil && len(pkt.streams) > 0 && p.verified && !cs.hasData()
-	var ad [4]byte
-	binary.BigEndian.PutUint16(ad[:], cs.sid)
-	binary.BigEndian.PutUint16(ad[2:], uint16(pn))
-	sealed := cs.seal.seal(nil, ad[:], plain, pn)
+	payload := cs.seal.sealUp(cs.sid, pn, plain)
 	cs.mu.Unlock()
 	dbg("cli send pn=%d path=%s plain=%x", pn, p.addr, plain)
-	m := cs.seal.mask(sealed)
-	payload := make([]byte, 0, 4+len(sealed))
-	payload = append(payload, ad[0], ad[1], ad[2]^m[0], ad[3]^m[1])
-	payload = append(payload, sealed...)
 
 	timeout := p.rto()
 	if !data {
@@ -961,7 +970,7 @@ func (c *Client) sendDataLocked(cs *clientSession, p *path, now time.Time, allow
 	if cs.unanswered.IsZero() {
 		cs.unanswered = now
 	}
-	c.sendLocked(p, &pendingQuery{p: p, sess: cs, pn: pn, probe: probe, scout: !p.verified, class: class}, payload, now, timeout)
+	c.sendLocked(p, &pendingQuery{p: p, sess: cs, pn: pn, probe: probe, scout: !p.verified, poll: !data, class: class}, payload, now, timeout)
 	// The tail of an upload (often a whole request) goes out twice, on another path if there is one.
 	if dup {
 		// A different resolver, so the copies don't share a failure; the same one if it's all we have.
@@ -1075,15 +1084,13 @@ func (c *Client) onAnswer(msg []byte) {
 		return
 	}
 	cs := q.sess
-	if cs == nil || cs.session == nil || len(a.txt) < 2+sampleLen {
+	if cs == nil || cs.session == nil {
 		return
 	}
-	sealed := a.txt[2:]
-	m := cs.open.mask(sealed)
-	ad := [2]byte{a.txt[0] ^ m[0], a.txt[1] ^ m[1]}
 	cs.mu.Lock()
-	pn := decodePN(cs.largestRecv, cs.haveRecv, binary.BigEndian.Uint16(ad[:]))
-	plain, err := cs.open.open(downAD(ad, q.pn), sealed, pn)
+	pn, plain, err := cs.open.openDown(a.txt, q.pn, func(trunc uint16) uint64 {
+		return decodePN(cs.largestRecv, cs.haveRecv, trunc)
+	})
 	if err != nil || len(plain) < 2 {
 		cs.mu.Unlock()
 		dbg("cli auth fail pn=%d err=%v", pn, err)
@@ -1092,6 +1099,9 @@ func (c *Client) onAnswer(msg []byte) {
 	delete(c.pending, a.txn)
 	cs.lastAuth, cs.unanswered = now, time.Time{}
 	p.maxAnswered = max(p.maxAnswered, q.seq+1)
+	if q.poll {
+		p.maxPollAnswered = max(p.maxPollAnswered, q.seq+1)
+	}
 	dbg("cli recv pn=%d for up=%d plain=%x", pn, q.pn, plain)
 	held := time.Duration(plain[0]) * 10 * time.Millisecond
 	cs.backlog = int(plain[1])

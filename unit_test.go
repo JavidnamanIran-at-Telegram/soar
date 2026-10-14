@@ -296,6 +296,17 @@ func TestCloseWakesAllBlockedReaders(t *testing.T) {
 	}
 }
 
+// The unknown-session signature folds only ASCII letters, so every implementation signs the same
+// bytes whatever the question holds; bytes.ToLower would rewrite invalid UTF-8 (SPEC §4.5).
+func TestUnknownSessionFoldsOnlyASCII(t *testing.T) {
+	question := []byte{3, 'A', 'b', 0xC0, 0x80, 0xFF, 'Z', 0, 0x10}
+	got := unknownSessionMsg(question)[len(unknownContext):]
+	want := []byte{3, 'a', 'b', 0xC0, 0x80, 0xFF, 'z', 0, 0x10}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("folded %x, want %x", got, want)
+	}
+}
+
 func TestReplayedAnswerFailsForAnotherQuery(t *testing.T) {
 	c := &packetCipher{}
 	trunc := [2]byte{0, 5}
@@ -443,6 +454,19 @@ func TestFinalSizeIsEnforced(t *testing.T) {
 	st2.onData(20, make([]byte, 10), false)
 	if err := st2.onData(0, make([]byte, 5), true); err == nil {
 		t.Fatal("FIN below data already received accepted")
+	}
+}
+
+func TestZoneSyntax(t *testing.T) {
+	for _, ok := range []string{"t.example.com", "T.Example.COM.", "_soar.example.com", strings.Repeat("a", 63) + ".x"} {
+		if _, err := parseZone(ok); err != nil {
+			t.Errorf("%q rejected: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"", ".", "a..b", strings.Repeat("a", 64) + ".x", "caf\xc3\xa9.example", "a b.example", "tab\t.example", "\u212a.example"} {
+		if _, err := parseZone(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
 	}
 }
 
