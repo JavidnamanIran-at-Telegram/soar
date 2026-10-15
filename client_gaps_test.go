@@ -1,6 +1,7 @@
 package soar
 
 import (
+	"context"
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -287,5 +288,40 @@ func TestMaxPendingHoldsForHellos(t *testing.T) {
 	c.sendHellosLocked(&clientSession{eph: eph, ready: make(chan struct{})}, now)
 	if len(c.pending) > maxPending {
 		t.Fatalf("%d pending, past the %d ceiling", len(c.pending), maxPending)
+	}
+}
+
+// Dial retires a session idle past SessionIdle, but not a younger one or one with a stream open.
+func TestDialRetiresOnlyAnIdleSession(t *testing.T) {
+	c := gapClient(t, Config{Resolvers: []string{"192.0.2.1:53"}, TCP: "off", SessionIdle: time.Minute})
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	c.mu.Lock()
+	cs := establish(c)
+	cs.lastAuth = time.Now().Add(-59 * time.Second)
+	c.mu.Unlock()
+	if got, err := c.session(ctx); err != nil || got != cs {
+		t.Fatalf("a session not yet idle was retired: %v", err)
+	}
+
+	c.mu.Lock()
+	cs.lastAuth = time.Now().Add(-2 * time.Minute)
+	cs.mu.Lock()
+	cs.openStream()
+	cs.mu.Unlock()
+	c.mu.Unlock()
+	if got, err := c.session(ctx); err != nil || got != cs {
+		t.Fatalf("a session with a stream open was retired: %v", err)
+	}
+
+	c.mu.Lock()
+	cs = establish(c)
+	cs.lastAuth = time.Now().Add(-2 * time.Minute)
+	c.mu.Unlock()
+	c.session(ctx) // nothing answers the new hello, so this times out
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !cs.isClosed() || c.sess == cs {
+		t.Fatal("the idle session was reused")
 	}
 }

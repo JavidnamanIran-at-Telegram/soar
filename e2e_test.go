@@ -453,6 +453,39 @@ func TestIdleSessionSurvivesResume(t *testing.T) {
 	}
 }
 
+// A client idle past the server's idle timeout must not dial on the session the server ended:
+// the first dial after the pause has to succeed, not fail with "server lost the session".
+func TestIdleSessionRetiredBeforeServerForgetsIt(t *testing.T) {
+	srv, pub := startServerWith(t, ServerConfig{Dial: loopbackDial, IdleTimeout: time.Second})
+	origin := startOrigin(t)
+	c, _ := NewClient(Config{Zone: testZone, ServerKey: pub, Resolvers: []string{srv}, SessionIdle: 500 * time.Millisecond})
+	defer c.Close()
+	fetch(t, c, origin, 1000)
+	c.mu.Lock()
+	sess := c.sess
+	c.mu.Unlock()
+	time.Sleep(2 * time.Second) // the server's sweep has ended the session by now
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, err := c.DialContext(ctx, "tcp", origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	fmt.Fprintf(conn, "%d\n", 1000)
+	got, err := io.ReadAll(conn)
+	if err != nil || !bytes.Equal(got, pattern(1000)) {
+		t.Fatalf("first dial after idling failed: %v (%d bytes)", err, len(got))
+	}
+	c.mu.Lock()
+	fresh := c.sess != sess
+	c.mu.Unlock()
+	if !fresh {
+		t.Fatal("the idle session was reused")
+	}
+}
+
 func TestPublicOnlyRefusesOwnAddressesViaNAT64(t *testing.T) {
 	addrs, _ := net.InterfaceAddrs()
 	for _, ia := range addrs {

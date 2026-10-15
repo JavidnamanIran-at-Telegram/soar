@@ -43,6 +43,11 @@ type Config struct {
 	StreamWindow uint64 // per-stream receive window. Default 256 KiB.
 	SendBuffer   int    // per-stream send buffer. Default 64 KiB.
 	MaxStreams   int    // Default 64; at most 256, so stream control frames fit the session's queue.
+	// SessionIdle retires a session with no streams and no authenticated answer for this long:
+	// the next Dial handshakes again rather than reuse a session the server may have ended
+	// (an idle client sends nothing, and the reference server forgets a session after 2
+	// minutes of silence). Keep it below the server's idle timeout. Default 90s.
+	SessionIdle time.Duration
 	// TCP controls TCP/53 paths: "auto" (default) adds one for a resolver whose UDP path never
 	// answers, "on" adds one for every resolver up front, "only" uses TCP alone, "off" never
 	// (except for resolvers StreamOnly reports).
@@ -95,6 +100,9 @@ func (c *Config) setDefaults() {
 	}
 	if c.MaxStreams <= 0 {
 		c.MaxStreams = 64
+	}
+	if c.SessionIdle <= 0 {
+		c.SessionIdle = 90 * time.Second
 	}
 	c.MaxStreams = min(c.MaxStreams, maxStreamsCap)
 	if c.Logger == nil {
@@ -236,6 +244,13 @@ type clientSession struct {
 	// unanswered is when the first query since the last authenticated answer went out (zero if
 	// none has); guarded by Client.mu.
 	unanswered time.Time
+}
+
+// busy reports whether the session has streams open or frames still to deliver.
+func (cs *clientSession) busy() bool {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return len(cs.streams) > 0 || len(cs.ctrlQ) > 0 || cs.dataInFlight()
 }
 
 func (cs *clientSession) isClosed() bool {
@@ -391,6 +406,9 @@ func (a tunnelAddr) String() string  { return string(a) }
 func (c *Client) session(ctx context.Context) (*clientSession, error) {
 	c.mu.Lock()
 	cs := c.sess
+	if cs != nil && cs.established && !cs.isClosed() && time.Since(cs.lastAuth) >= c.cfg.SessionIdle && !cs.busy() {
+		cs.close(errors.New("soar: session idle"))
+	}
 	if cs != nil && cs.isClosed() {
 		cs = nil
 	}
@@ -851,9 +869,7 @@ func (c *Client) fillLocked(now time.Time) {
 	// Keep one probe on each unverified path, so new and recovering resolvers get vetted, but
 	// only while there's real traffic: a lost probe's ack and LOST bookkeeping mustn't count, or
 	// it would beget another probe and an idle session would never go quiet.
-	cs.mu.Lock()
-	busy := len(cs.streams) > 0 || len(cs.ctrlQ) > 0 || cs.dataInFlight()
-	cs.mu.Unlock()
+	busy := cs.busy()
 	for _, p := range c.paths {
 		if !busy {
 			break
