@@ -470,6 +470,10 @@ Version 1 has no handshake for ending a session:
 - A client learns its session is gone from the signed unknown-session answer (section 4.5). As a
   backstop, the reference client also gives up after 15 s with no authenticated answer while it has
   queries outstanding. Then it handshakes again.
+- An idle client sends nothing, so the server ends its session after the idle timeout without the
+  client knowing. A client SHOULD NOT open a stream on a session that has had no streams and no
+  authenticated answer for close to that long; it handshakes again instead. The reference client
+  does so after 90 s. Otherwise the stream fails as soon as the unknown-session answer arrives.
 - Receiving CLOSE, or any frame error, ends the session at once.
 
 ## 8. Streams

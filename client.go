@@ -43,6 +43,11 @@ type Config struct {
 	StreamWindow uint64 // per-stream receive window. Default 256 KiB.
 	SendBuffer   int    // per-stream send buffer. Default 64 KiB.
 	MaxStreams   int    // Default 64; at most 256, so stream control frames fit the session's queue.
+	// SessionIdle retires a session with no streams and no authenticated answer for this long:
+	// the next Dial handshakes again rather than reuse a session the server may have ended
+	// (an idle client sends nothing, and the reference server forgets a session after 2
+	// minutes of silence). Keep it below the server's idle timeout. Default 90s.
+	SessionIdle time.Duration
 	// TCP controls TCP/53 paths: "auto" (default) adds one for a resolver whose UDP path never
 	// answers, "on" adds one for every resolver up front, "only" uses TCP alone, "off" never
 	// (except for resolvers StreamOnly reports).
@@ -95,6 +100,9 @@ func (c *Config) setDefaults() {
 	}
 	if c.MaxStreams <= 0 {
 		c.MaxStreams = 64
+	}
+	if c.SessionIdle <= 0 {
+		c.SessionIdle = 90 * time.Second
 	}
 	c.MaxStreams = min(c.MaxStreams, maxStreamsCap)
 	if c.Logger == nil {
@@ -238,6 +246,30 @@ type clientSession struct {
 	unanswered time.Time
 }
 
+// errSessionIdle ends a session retired for idling; see Config.SessionIdle.
+var errSessionIdle = errors.New("soar: session idle")
+
+// busy reports whether the session has streams open or frames still to deliver.
+func (cs *clientSession) busy() bool {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return cs.busyLocked()
+}
+
+func (cs *clientSession) busyLocked() bool {
+	return len(cs.streams) > 0 || len(cs.ctrlQ) > 0 || cs.dataInFlight()
+}
+
+// retireIfIdle ends an established session that has sat idle for limit, checking and closing
+// under one lock so a stream can't open in between. Called with Client.mu held (for lastAuth).
+func (cs *clientSession) retireIfIdle(now time.Time, limit time.Duration) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if !cs.closed && now.Sub(cs.lastAuth) >= limit && !cs.busyLocked() {
+		cs.closeLocked(errSessionIdle)
+	}
+}
+
 func (cs *clientSession) isClosed() bool {
 	if cs.session == nil {
 		return false
@@ -365,15 +397,24 @@ func (c *Client) DialContext(ctx context.Context, network, addr string) (net.Con
 	if len(addr) == 0 || len(addr) > 255 {
 		return nil, errors.New("soar: bad address")
 	}
-	cs, err := c.session(ctx)
-	if err != nil {
-		return nil, err
-	}
-	cs.mu.Lock()
-	st, err := cs.openStream()
-	if err != nil {
+	var cs *clientSession
+	var st *stream
+	for {
+		var err error
+		if cs, err = c.session(ctx); err != nil {
+			return nil, err
+		}
+		cs.mu.Lock()
+		st, err = cs.openStream()
+		if err == nil {
+			break
+		}
 		cs.mu.Unlock()
-		return nil, err
+		// Another Dial retired the session as idle between our getting it and opening a stream:
+		// the next call handshakes afresh.
+		if !errors.Is(err, errSessionIdle) {
+			return nil, err
+		}
 	}
 	st.sbuf = append(append(st.sbuf, byte(len(addr))), addr...)
 	st.spending.add(0, uint64(len(st.sbuf)))
@@ -391,6 +432,9 @@ func (a tunnelAddr) String() string  { return string(a) }
 func (c *Client) session(ctx context.Context) (*clientSession, error) {
 	c.mu.Lock()
 	cs := c.sess
+	if cs != nil && cs.established {
+		cs.retireIfIdle(time.Now(), c.cfg.SessionIdle)
+	}
 	if cs != nil && cs.isClosed() {
 		cs = nil
 	}
@@ -851,9 +895,7 @@ func (c *Client) fillLocked(now time.Time) {
 	// Keep one probe on each unverified path, so new and recovering resolvers get vetted, but
 	// only while there's real traffic: a lost probe's ack and LOST bookkeeping mustn't count, or
 	// it would beget another probe and an idle session would never go quiet.
-	cs.mu.Lock()
-	busy := len(cs.streams) > 0 || len(cs.ctrlQ) > 0 || cs.dataInFlight()
-	cs.mu.Unlock()
+	busy := cs.busy()
 	for _, p := range c.paths {
 		if !busy {
 			break
