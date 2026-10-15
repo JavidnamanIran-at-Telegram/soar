@@ -246,11 +246,28 @@ type clientSession struct {
 	unanswered time.Time
 }
 
+// errSessionIdle ends a session retired for idling; see Config.SessionIdle.
+var errSessionIdle = errors.New("soar: session idle")
+
 // busy reports whether the session has streams open or frames still to deliver.
 func (cs *clientSession) busy() bool {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
+	return cs.busyLocked()
+}
+
+func (cs *clientSession) busyLocked() bool {
 	return len(cs.streams) > 0 || len(cs.ctrlQ) > 0 || cs.dataInFlight()
+}
+
+// retireIfIdle ends an established session that has sat idle for limit, checking and closing
+// under one lock so a stream can't open in between. Called with Client.mu held (for lastAuth).
+func (cs *clientSession) retireIfIdle(now time.Time, limit time.Duration) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if !cs.closed && now.Sub(cs.lastAuth) >= limit && !cs.busyLocked() {
+		cs.closeLocked(errSessionIdle)
+	}
 }
 
 func (cs *clientSession) isClosed() bool {
@@ -380,15 +397,24 @@ func (c *Client) DialContext(ctx context.Context, network, addr string) (net.Con
 	if len(addr) == 0 || len(addr) > 255 {
 		return nil, errors.New("soar: bad address")
 	}
-	cs, err := c.session(ctx)
-	if err != nil {
-		return nil, err
-	}
-	cs.mu.Lock()
-	st, err := cs.openStream()
-	if err != nil {
+	var cs *clientSession
+	var st *stream
+	for {
+		var err error
+		if cs, err = c.session(ctx); err != nil {
+			return nil, err
+		}
+		cs.mu.Lock()
+		st, err = cs.openStream()
+		if err == nil {
+			break
+		}
 		cs.mu.Unlock()
-		return nil, err
+		// Another Dial retired the session as idle between our getting it and opening a stream:
+		// the next call handshakes afresh.
+		if !errors.Is(err, errSessionIdle) {
+			return nil, err
+		}
 	}
 	st.sbuf = append(append(st.sbuf, byte(len(addr))), addr...)
 	st.spending.add(0, uint64(len(st.sbuf)))
@@ -406,8 +432,8 @@ func (a tunnelAddr) String() string  { return string(a) }
 func (c *Client) session(ctx context.Context) (*clientSession, error) {
 	c.mu.Lock()
 	cs := c.sess
-	if cs != nil && cs.established && !cs.isClosed() && time.Since(cs.lastAuth) >= c.cfg.SessionIdle && !cs.busy() {
-		cs.close(errors.New("soar: session idle"))
+	if cs != nil && cs.established {
+		cs.retireIfIdle(time.Now(), c.cfg.SessionIdle)
 	}
 	if cs != nil && cs.isClosed() {
 		cs = nil
