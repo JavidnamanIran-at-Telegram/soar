@@ -351,3 +351,30 @@ func TestDialRetiresAnUnusedSessionSooner(t *testing.T) {
 		t.Fatal("an unused session past unusedSessionIdle was reused")
 	}
 }
+
+// The server times an unused session from its hello, and a retried hello gets the same session
+// back, so a handshake whose reply came late is judged from the first hello, not the reply. A
+// session that has only just come up is spared: a Dial waiting on it is about to use it.
+func TestUnusedSessionAgeCountsFromFirstHello(t *testing.T) {
+	c := gapClient(t, Config{Resolvers: []string{"192.0.2.1:53"}, TCP: "off", SessionIdle: time.Minute})
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	c.mu.Lock()
+	cs := establish(c)
+	cs.firstHello = time.Now().Add(-unusedSessionIdle - time.Second)
+	cs.lastAuth = time.Now().Add(-freshSessionGrace / 2)
+	c.mu.Unlock()
+	if got, err := c.session(ctx); err != nil || got != cs {
+		t.Fatalf("a session that just came up was retired: %v", err)
+	}
+
+	c.mu.Lock()
+	cs.lastAuth = time.Now().Add(-3 * time.Second)
+	c.mu.Unlock()
+	c.session(ctx) // nothing answers the new hello, so this times out
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !cs.isClosed() || c.sess == cs {
+		t.Fatal("an unused session whose hello is past the limit was reused")
+	}
+}

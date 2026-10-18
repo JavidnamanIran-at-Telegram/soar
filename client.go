@@ -241,6 +241,7 @@ type clientSession struct {
 	established bool
 	backlog     int
 	used        bool      // a stream has been opened on it; guarded by session.mu
+	firstHello  time.Time // when its first hello went out; guarded by Client.mu
 	lastAuth    time.Time // last authenticated answer; guarded by Client.mu
 	// unanswered is when the first query since the last authenticated answer went out (zero if
 	// none has); guarded by Client.mu.
@@ -256,6 +257,10 @@ var errSessionIdle = errors.New("soar: session idle")
 // handshake completes anyway.
 const unusedSessionIdle = 10 * time.Second
 
+// freshSessionGrace spares a session that has only just come up from unusedSessionIdle: a Dial
+// waiting on its handshake is about to open a stream on it.
+const freshSessionGrace = time.Second
+
 // busy reports whether the session has streams open or frames still to deliver.
 func (cs *clientSession) busy() bool {
 	cs.mu.Lock()
@@ -269,14 +274,20 @@ func (cs *clientSession) busyLocked() bool {
 
 // retireIfIdle ends an established session that has sat idle for limit, or for
 // unusedSessionIdle if it never carried a stream, checking and closing under one lock so a
-// stream can't open in between. Called with Client.mu held (for lastAuth).
+// stream can't open in between. Called with Client.mu held (for lastAuth and firstHello).
 func (cs *clientSession) retireIfIdle(now time.Time, limit time.Duration) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
+	since := cs.lastAuth
 	if !cs.used {
 		limit = min(limit, unusedSessionIdle)
+		// The server times an unused session from its hello, and a retried hello gets the
+		// same session back, so a slow handshake has already used up part of the limit.
+		if !cs.firstHello.IsZero() && now.Sub(cs.lastAuth) >= freshSessionGrace {
+			since = cs.firstHello
+		}
 	}
-	if !cs.closed && now.Sub(cs.lastAuth) >= limit && !cs.busyLocked() {
+	if !cs.closed && now.Sub(since) >= limit && !cs.busyLocked() {
 		cs.closeLocked(errSessionIdle)
 	}
 }
@@ -1007,6 +1018,9 @@ func (c *Client) sendHellosLocked(cs *clientSession, now time.Time) {
 			continue
 		}
 		p.lastHello = now
+		if cs.firstHello.IsZero() {
+			cs.firstHello = now
+		}
 		c.sendLocked(p, &pendingQuery{p: p, sess: cs, hello: true, scout: true}, payload, now, time.Second)
 		sent++
 	}

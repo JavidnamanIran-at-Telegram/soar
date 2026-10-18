@@ -486,23 +486,114 @@ func TestIdleSessionRetiredBeforeServerForgetsIt(t *testing.T) {
 	}
 }
 
+// gatedResolver relays queries to server but holds the answers until release is called, so a
+// test can end a Dial while its hello is answered but not yet delivered.
+func gatedResolver(t *testing.T, server string) (addr string, held func() int, release func()) {
+	front, _ := net.ListenPacket("udp", "127.0.0.1:0")
+	t.Cleanup(func() { front.Close() })
+	saddr, _ := net.ResolveUDPAddr("udp", server)
+	var mu sync.Mutex
+	gated := true
+	type answer struct {
+		msg []byte
+		to  net.Addr
+	}
+	var queue []answer
+	deliver := func(a answer) {
+		mu.Lock()
+		if gated {
+			queue = append(queue, a)
+			mu.Unlock()
+			return
+		}
+		mu.Unlock()
+		front.WriteTo(a.msg, a.to)
+	}
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, from, err := front.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			msg := append([]byte(nil), buf[:n]...)
+			go func() {
+				back, _ := net.ListenPacket("udp", "127.0.0.1:0")
+				defer back.Close()
+				back.WriteTo(msg, saddr)
+				back.SetReadDeadline(time.Now().Add(3 * time.Second))
+				rb := make([]byte, 4096)
+				if m, _, err := back.ReadFrom(rb); err == nil {
+					deliver(answer{append([]byte(nil), rb[:m]...), from})
+				}
+			}()
+		}
+	}()
+	held = func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(queue)
+	}
+	release = func() {
+		mu.Lock()
+		gated = false
+		q := queue
+		queue = nil
+		mu.Unlock()
+		for _, a := range q {
+			front.WriteTo(a.msg, a.to)
+		}
+	}
+	return front.LocalAddr().String(), held, release
+}
+
 // A Dial whose context ends mid-handshake, as when another transport wins a race, leaves a
-// session that never carries a stream. The server ends it 15 s after the hello, so a later Dial
-// must handshake afresh rather than fail with "server lost the session".
+// session that never carries a stream once the hello's answer arrives. The server ends it 15 s
+// after the hello, so a later Dial must handshake afresh rather than fail with "server lost the
+// session".
 func TestCanceledDialDoesNotStrandASession(t *testing.T) {
 	if testing.Short() {
 		t.Skip("waits out the server's unused-session limit")
 	}
 	srv, pub := startServer(t)
 	origin := startOrigin(t)
-	c, _ := NewClient(Config{Zone: testZone, ServerKey: pub, Resolvers: []string{srv}})
+	resolver, held, release := gatedResolver(t, srv)
+	c, _ := NewClient(Config{Zone: testZone, ServerKey: pub, Resolvers: []string{resolver}, TCP: "off"})
 	defer c.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
-	if conn, err := c.DialContext(ctx, "tcp", origin); err == nil {
-		conn.Close()
-		t.Skip("the handshake beat a 1 ms deadline")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	dialed := make(chan error, 1)
+	go func() {
+		conn, err := c.DialContext(ctx, "tcp", origin)
+		if err == nil {
+			conn.Close()
+		}
+		dialed <- err
+	}()
+	for deadline := time.Now().Add(5 * time.Second); held() == 0; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the server never answered the hello")
+		}
 	}
 	cancel()
+	if err := <-dialed; err == nil {
+		t.Fatal("the dial succeeded with its hello answer held back")
+	}
+	release()
+
+	var unused bool
+	for deadline := time.Now().Add(5 * time.Second); !unused; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the abandoned handshake never left an established, unused session")
+		}
+		c.mu.Lock()
+		if cs := c.sess; cs != nil && cs.established {
+			cs.mu.Lock()
+			unused = !cs.used && !cs.closed
+			cs.mu.Unlock()
+		}
+		c.mu.Unlock()
+	}
 	time.Sleep(16 * time.Second) // past the server's 15 s limit for a session with no data
 	fetch(t, c, origin, 1000)
 }
