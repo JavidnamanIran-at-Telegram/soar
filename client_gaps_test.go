@@ -298,6 +298,7 @@ func TestDialRetiresOnlyAnIdleSession(t *testing.T) {
 	defer cancel()
 	c.mu.Lock()
 	cs := establish(c)
+	cs.used = true
 	cs.lastAuth = time.Now().Add(-59 * time.Second)
 	c.mu.Unlock()
 	if got, err := c.session(ctx); err != nil || got != cs {
@@ -323,5 +324,30 @@ func TestDialRetiresOnlyAnIdleSession(t *testing.T) {
 	defer c.mu.Unlock()
 	if !cs.isClosed() || c.sess == cs {
 		t.Fatal("the idle session was reused")
+	}
+}
+
+// A session that never carried a stream is retired after unusedSessionIdle, well before
+// SessionIdle, since the server ends it 15 s after its hello.
+func TestDialRetiresAnUnusedSessionSooner(t *testing.T) {
+	c := gapClient(t, Config{Resolvers: []string{"192.0.2.1:53"}, TCP: "off", SessionIdle: time.Minute})
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	c.mu.Lock()
+	cs := establish(c)
+	cs.lastAuth = time.Now().Add(-unusedSessionIdle + time.Second)
+	c.mu.Unlock()
+	if got, err := c.session(ctx); err != nil || got != cs {
+		t.Fatalf("an unused session not yet idle was retired: %v", err)
+	}
+
+	c.mu.Lock()
+	cs.lastAuth = time.Now().Add(-unusedSessionIdle - time.Second)
+	c.mu.Unlock()
+	c.session(ctx) // nothing answers the new hello, so this times out
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !cs.isClosed() || c.sess == cs {
+		t.Fatal("an unused session past unusedSessionIdle was reused")
 	}
 }

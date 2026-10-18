@@ -486,6 +486,27 @@ func TestIdleSessionRetiredBeforeServerForgetsIt(t *testing.T) {
 	}
 }
 
+// A Dial whose context ends mid-handshake, as when another transport wins a race, leaves a
+// session that never carries a stream. The server ends it 15 s after the hello, so a later Dial
+// must handshake afresh rather than fail with "server lost the session".
+func TestCanceledDialDoesNotStrandASession(t *testing.T) {
+	if testing.Short() {
+		t.Skip("waits out the server's unused-session limit")
+	}
+	srv, pub := startServer(t)
+	origin := startOrigin(t)
+	c, _ := NewClient(Config{Zone: testZone, ServerKey: pub, Resolvers: []string{srv}})
+	defer c.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	if conn, err := c.DialContext(ctx, "tcp", origin); err == nil {
+		conn.Close()
+		t.Skip("the handshake beat a 1 ms deadline")
+	}
+	cancel()
+	time.Sleep(16 * time.Second) // past the server's 15 s limit for a session with no data
+	fetch(t, c, origin, 1000)
+}
+
 func TestPublicOnlyRefusesOwnAddressesViaNAT64(t *testing.T) {
 	addrs, _ := net.InterfaceAddrs()
 	for _, ia := range addrs {

@@ -240,6 +240,7 @@ type clientSession struct {
 	ready       chan struct{}
 	established bool
 	backlog     int
+	used        bool      // a stream has been opened on it; guarded by session.mu
 	lastAuth    time.Time // last authenticated answer; guarded by Client.mu
 	// unanswered is when the first query since the last authenticated answer went out (zero if
 	// none has); guarded by Client.mu.
@@ -248,6 +249,12 @@ type clientSession struct {
 
 // errSessionIdle ends a session retired for idling; see Config.SessionIdle.
 var errSessionIdle = errors.New("soar: session idle")
+
+// unusedSessionIdle retires a session that has never carried a stream. The server ends such a
+// session 15 s after its hello (SPEC 7.4), much sooner than an idle one. It is left behind when
+// a Dial's context ends mid-handshake, as when another transport wins a race, and the
+// handshake completes anyway.
+const unusedSessionIdle = 10 * time.Second
 
 // busy reports whether the session has streams open or frames still to deliver.
 func (cs *clientSession) busy() bool {
@@ -260,11 +267,15 @@ func (cs *clientSession) busyLocked() bool {
 	return len(cs.streams) > 0 || len(cs.ctrlQ) > 0 || cs.dataInFlight()
 }
 
-// retireIfIdle ends an established session that has sat idle for limit, checking and closing
-// under one lock so a stream can't open in between. Called with Client.mu held (for lastAuth).
+// retireIfIdle ends an established session that has sat idle for limit, or for
+// unusedSessionIdle if it never carried a stream, checking and closing under one lock so a
+// stream can't open in between. Called with Client.mu held (for lastAuth).
 func (cs *clientSession) retireIfIdle(now time.Time, limit time.Duration) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
+	if !cs.used {
+		limit = min(limit, unusedSessionIdle)
+	}
 	if !cs.closed && now.Sub(cs.lastAuth) >= limit && !cs.busyLocked() {
 		cs.closeLocked(errSessionIdle)
 	}
@@ -407,6 +418,7 @@ func (c *Client) DialContext(ctx context.Context, network, addr string) (net.Con
 		cs.mu.Lock()
 		st, err = cs.openStream()
 		if err == nil {
+			cs.used = true
 			break
 		}
 		cs.mu.Unlock()
