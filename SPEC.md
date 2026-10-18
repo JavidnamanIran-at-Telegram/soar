@@ -474,6 +474,9 @@ Version 1 has no handshake for ending a session:
   client knowing. A client SHOULD NOT open a stream on a session that has had no streams and no
   authenticated answer for close to that long; it handshakes again instead. The reference client
   does so after 90 s. Otherwise the stream fails as soon as the unknown-session answer arrives.
+  The same goes for a session that has never carried a stream, against the 15 s limit above: such
+  a session is left behind when a dial is abandoned mid-handshake. The reference client retires
+  one after 10 s.
 - Receiving CLOSE, or any frame error, ends the session at once.
 
 ## 8. Streams
