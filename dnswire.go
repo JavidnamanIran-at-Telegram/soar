@@ -21,6 +21,11 @@ const (
 	maxLabel    = 63
 	// maxName is the longest presentation-format name (RFC 1035: 255 wire bytes).
 	maxName = 253
+	// maxWireName is that name in wire form, and maxLabels the most labels it can hold: every
+	// label costs a length byte and at least one character. Parsing a name holds its labels in
+	// a stack array of this size, so a query costs no heap allocation to take apart.
+	maxWireName = 255
+	maxLabels   = maxWireName / 2
 
 	rcodeOK       = 0
 	rcodeServFail = 2
@@ -188,7 +193,8 @@ func parseQuery(msg []byte, z zone) (*query, error) {
 		return nil, errDNS
 	}
 	q := &query{txn: binary.BigEndian.Uint16(msg), rd: msg[2]&0x01 != 0, edns: 512, size: len(msg)}
-	var labels [][]byte
+	var lbuf [maxLabels][]byte
+	labels := lbuf[:0]
 	i := hdrLen
 	for {
 		if i >= len(msg) {
@@ -199,7 +205,9 @@ func parseQuery(msg []byte, z zone) (*query, error) {
 			i++
 			break
 		}
-		if n > maxLabel || i+1+n > len(msg) {
+		// A name is at most 255 wire bytes (RFC 1035 §2.3.4), so anything longer is malformed
+		// however it is framed: refusing it here also bounds the work one query can ask for.
+		if n > maxLabel || i+1+n > len(msg) || i+1+n-hdrLen > maxWireName || len(labels) == maxLabels {
 			return nil, errDNS
 		}
 		labels = append(labels, msg[i+1:i+1+n])
@@ -235,7 +243,10 @@ func parseQuery(msg []byte, z zone) (*query, error) {
 	if q.apex {
 		return q, nil
 	}
-	var enc []byte
+	// The concatenated base32 goes in a stack buffer: a name's labels can never exceed it, and
+	// this runs on every query the server receives.
+	var encbuf [maxName]byte
+	enc := encbuf[:0]
 	for _, l := range labels[:len(labels)-zl] {
 		enc = append(enc, l...)
 	}
