@@ -168,6 +168,8 @@ func frameObj(f *frame) obj {
 		return obj{"type": "max_stream_data", "id": f.id, "max": f.val}
 	case f.typ == frClose:
 		return obj{"type": "close", "code": f.val}
+	case f.typ == frExt:
+		return obj{"type": "ext", "sub_type": f.val, "body": hx(f.data)}
 	case f.typ == frLost:
 		return obj{"type": "lost", "pns": f.lost}
 	case f.typ == frOpened:
@@ -213,6 +215,9 @@ func frameVectors(t *testing.T) []obj {
 			[]obj{{"type": "stream", "id": 1, "offset": 4096, "data": "", "fin": true, "explicit_length": true}}},
 		{"stream without length runs to the end of the packet", appendStream(nil, 7, 0, []byte("rest"), true, true),
 			[]obj{{"type": "stream", "id": 7, "offset": 0, "data": hx([]byte("rest")), "fin": true, "explicit_length": false}}},
+		{"ext, a sub-type the receiver does not know, then the frame after it",
+			append(appendVarint(appendVarint([]byte{frExt}, 0x3f), 2), 0xaa, 0xbb, frPing),
+			[]obj{{"type": "ext", "sub_type": 0x3f, "body": "aabb"}, {"type": "ping"}}},
 	}
 	var out []obj
 	for _, c := range cases {
@@ -246,7 +251,10 @@ func badFrameVectors(t *testing.T) []obj {
 		name string
 		enc  []byte
 	}{
-		{"unknown frame type", []byte{0x10}},
+		{"unknown frame type", []byte{0x11}},
+		{"ext with no sub-type", []byte{frExt}},
+		{"ext body past the packet", append(appendVarint(appendVarint([]byte{frExt}, 0x01), 64), 1, 2, 3)},
+		{"ext body over the limit", appendVarint(appendVarint([]byte{frExt}, 0x01), maxExtBody+1)},
 		{"truncated varint", []byte{frClose, 0x40}},
 		{"ack with no ranges", []byte{frAck, 0}},
 		{"ack with too many ranges", append([]byte{frAck}, appendVarint(nil, 65)...)},

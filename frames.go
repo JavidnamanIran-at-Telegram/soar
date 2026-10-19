@@ -15,6 +15,16 @@ const (
 	frLost      = 0x06 // client→server: upstream pns whose queries got no usable answer
 	frOpened    = 0x07 // server→client: stream id, 0: the stream's destination dial succeeded
 	frStream    = 0x08 // 0x08|OFF|LEN|FIN: stream id, [offset], [length], data
+	// frExt carries a sub-type and an explicit length, so a peer that does not know a
+	// sub-type skips the frame instead of failing the packet. SPEC §6 makes an unknown frame
+	// type fatal and the single-byte type space below 0x10 is full (0x00-0x07 allocated,
+	// 0x08-0x0F STREAM), so one reserved type with sub-types is the only way to add anything
+	// to v1 - and the last chance to do it, since 0x10 is itself unknown to a peer that has
+	// not got this change. Frames here are only ever sent to a peer that asked for them.
+	frExt = 0x10
+
+	// Extension sub-types.
+	extIdent = 0x01 // client identity: key id, MAC over the handshake transcript
 
 	streamFin = 0x01
 	streamLen = 0x02
@@ -22,6 +32,9 @@ const (
 
 	maxAckRanges  = 16
 	maxLostPerPkt = 32
+	// maxExtBody bounds an extension frame body, so a length field cannot make a peer read
+	// past the packet or hold a large slice of it.
+	maxExtBody = 256
 )
 
 var errFrame = errors.New("soar: malformed frame")
@@ -96,6 +109,13 @@ func parseFrames(b []byte, fn func(*frame) error) error {
 				f.lost = append(f.lost, v)
 				prev = v
 			}
+		case f.typ == frExt:
+			f.val = r.varint()
+			n := r.varint()
+			if n > maxExtBody {
+				return errFrame
+			}
+			f.data = r.bytes(n)
 		case f.typ&0xF8 == frStream:
 			f.id = r.varint()
 			if f.typ&streamOff != 0 {

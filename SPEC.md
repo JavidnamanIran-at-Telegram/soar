@@ -348,6 +348,18 @@ session as failed and end it (vectors: `bad_frames`).
 | `0x06` | LOST | client | upstream packet numbers that got no usable answer |
 | `0x07` | OPENED | server | stream id, reserved |
 | `0x08`–`0x0F` | STREAM | both | stream id, [offset], [length], data |
+| `0x10` | EXT | both | sub-type, length, body |
+
+**EXT** (`0x10`). `sub_type (varint) || length (varint) || body`. The length makes the frame
+skippable: a receiver that does not know `sub_type` MUST ignore the frame and carry on with the
+frames after it, rather than failing the session. `length` MUST be at most 256; a larger one, or a
+body the packet does not hold, fails the session like any malformed frame.
+
+EXT exists because the rule above - an unknown *type* ends the session - leaves no way to add a
+frame to v1 once it is stable, and the single-byte space below `0x10` is full. One reserved type
+with sub-types costs two bytes per frame and settles the question for every future addition. An
+implementation that does not know EXT itself will of course still fail the session, which is why a
+sub-type is only ever sent to a peer that asked for it.
 
 **PADDING** (`0x00`). The receiver stops parsing at the first PADDING byte. Everything after it is
 padding, whatever its value.
@@ -565,6 +577,7 @@ if the file is out of date. Byte strings are lower-case hex. The sections:
 | `packet_number` | decode `truncated` given `largest` → `pn` (section 5.3) |
 | `frames` | parse `encoded` → `frames`, and re-encode those frames to the same bytes (except as noted below) |
 | `bad_frames` | parsing `encoded` fails |
+| `frames` (`ext`) | an EXT frame parses to `sub_type` and `body`; an unknown `sub_type` is skipped and the frame after it still parses |
 | `stream_open` | the destination prefix for `address` |
 | `handshake` | from the fixed keys: `shared_secret`, `transcript`, `prk`, the `up`/`down` keys, and the exact `hello_reply` (Ed25519 signatures are deterministic) |
 | `packets` | seal `plaintext` → `payload` (with `nonce` and `mask` as intermediates), and open it back, decoding the packet number with `largest_received` (null: nothing received yet) |

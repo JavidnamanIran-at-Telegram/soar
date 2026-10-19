@@ -1,8 +1,20 @@
 {
   "bad_frames": [
     {
-      "encoded": "10",
+      "encoded": "11",
       "name": "unknown frame type"
+    },
+    {
+      "encoded": "10",
+      "name": "ext with no sub-type"
+    },
+    {
+      "encoded": "10014040010203",
+      "name": "ext body past the packet"
+    },
+    {
+      "encoded": "10014101",
+      "name": "ext body over the limit"
     },
     {
       "encoded": "0540",
@@ -503,6 +515,20 @@
         }
       ],
       "name": "stream without length runs to the end of the packet"
+    },
+    {
+      "encoded": "103f02aabb01",
+      "frames": [
+        {
+          "body": "aabb",
+          "sub_type": 63,
+          "type": "ext"
+        },
+        {
+          "type": "ping"
+        }
+      ],
+      "name": "ext, a sub-type the receiver does not know, then the frame after it"
     },
     {
       "encoded": "04008004000006010c020103030a00100f6578616d706c652e636f6d3a343433",
