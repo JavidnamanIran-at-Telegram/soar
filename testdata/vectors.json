@@ -517,6 +517,17 @@
       "name": "stream without length runs to the end of the packet"
     },
     {
+      "encoded": "1001186061626364656667707172737475767778797a7b7c7d7e7f",
+      "frames": [
+        {
+          "body": "6061626364656667707172737475767778797a7b7c7d7e7f",
+          "sub_type": 1,
+          "type": "ext"
+        }
+      ],
+      "name": "ext, client identity"
+    },
+    {
       "encoded": "103f02aabb01",
       "frames": [
         {

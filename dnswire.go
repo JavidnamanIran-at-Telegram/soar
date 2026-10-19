@@ -92,6 +92,10 @@ func b32Decode(dst, src []byte) ([]byte, error) {
 type zone struct {
 	wire []byte // length-prefixed labels
 	text string
+	// userLabel: the label directly above the zone names an account rather than carrying
+	// payload. Soar has no identity of its own - one server key is shared by every client -
+	// so this is what lets a server tell accounts apart. See identity.go.
+	userLabel bool
 }
 
 func parseZone(s string) (zone, error) {
@@ -182,9 +186,11 @@ type query struct {
 	payload  []byte // decoded tunnel payload, or nil if the name isn't under the zone
 	edns     int    // the sender's UDP payload size; 512 without OPT
 	hasOPT   bool
-	size     int  // bytes in the query message, for amplification accounting
-	inZone   bool // the name is the zone or under it
-	apex     bool // the name is the zone itself
+	size     int    // bytes in the query message, for amplification accounting
+	inZone   bool   // the name is the zone or under it
+	apex     bool   // the name is the zone itself
+	label    string // account label above the zone, lower-cased, when zone.userLabel is set
+	badLabel bool   // the label was present but not usable (see validLabel)
 }
 
 // parseQuery parses a query and decodes the tunnel payload under z.
@@ -243,11 +249,28 @@ func parseQuery(msg []byte, z zone) (*query, error) {
 	if q.apex {
 		return q, nil
 	}
+	above := labels[:len(labels)-zl]
+	// The account label sits directly above the zone, so a client needs no change: it is
+	// configured with a longer zone, and everything it encodes stays above the label.
+	if z.userLabel {
+		if len(above) == 0 {
+			return q, nil
+		}
+		// Fold the case: a resolver may randomize the case of a name on the way to us (0x20
+		// encoding), which is also why the base32 payload decodes case-insensitively, so the
+		// bytes that arrive are not necessarily the bytes the client was configured with.
+		if l, ok := validLabel(above[len(above)-1]); ok {
+			q.label = l
+		} else {
+			q.badLabel = true
+		}
+		above = above[:len(above)-1]
+	}
 	// The concatenated base32 goes in a stack buffer: a name's labels can never exceed it, and
 	// this runs on every query the server receives.
 	var encbuf [maxName]byte
 	enc := encbuf[:0]
-	for _, l := range labels[:len(labels)-zl] {
+	for _, l := range above {
 		enc = append(enc, l...)
 	}
 	p, err := b32Decode(make([]byte, 0, len(enc)*5/8), enc)

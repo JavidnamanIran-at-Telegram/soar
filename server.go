@@ -47,7 +47,35 @@ type ServerConfig struct {
 	// MaxStreams caps streams per session. Default 128; at most 256, so stream control frames
 	// fit the session's queue.
 	MaxStreams int
-	Logger     *slog.Logger
+
+	// IdentifyByLabel reads the label directly above Zone as the client's account name and
+	// passes it to Dial through the context (see IdentityFromContext), so one server can meter
+	// many accounts. Off by default: upstream treats every label above the zone as payload.
+	//
+	// The label travels in the query name in cleartext, so it is a bearer credential: anyone
+	// who carries the query can copy it or rewrite it. It is pinned to the handshake - the
+	// label on the hello is the session's for the session's whole life - which stops a session
+	// being re-attributed mid-flight, but nothing in the name can stop an on-path resolver
+	// attributing a session wrongly from the start. Use VerifyClient wherever the client can
+	// be changed. See identity.go.
+	IdentifyByLabel bool
+	// VerifyLabel authorizes a label and resolves it to an account. It runs before any
+	// handshake crypto, so an unrecognized label costs a refusal and nothing else. Optional:
+	// without it every well-formed label is accepted and simply reported to Dial.
+	VerifyLabel func(label string) (account any, ok bool)
+	// VerifyClient resolves a sealed identity's key id to the account's shared key and the
+	// account itself. Setting it is what makes the server accept IDENT frames at all; the key
+	// is used once per session, to check a MAC over the handshake transcript.
+	VerifyClient func(keyID [IdentKeyLen]byte) (key []byte, account any, ok bool)
+	// RequireIdentity refuses to dial for a session with no identity, so a client that sends no
+	// IDENT frame gets no streams. Such a session is swept 15 s after its hello, like any
+	// session that never sent data.
+	RequireIdentity bool
+	// MaxSessionsPerAccount caps concurrent sessions for one account, so one account - or one
+	// copied label - cannot fill MaxSessions. Default 0: no limit.
+	MaxSessionsPerAccount int
+
+	Logger *slog.Logger
 }
 
 func (c *ServerConfig) setDefaults() {
@@ -116,6 +144,12 @@ type Server struct {
 	rrlMu       sync.Mutex
 	rrl         map[netip.Prefix]*byteBucket
 	rrlOverflow *byteBucket
+
+	// acctMu guards perAccount, the live session count per account (MaxSessionsPerAccount).
+	// It is a leaf: it is taken while s.mu or a session's lock is held and takes nothing
+	// itself, so it can never be part of a cycle.
+	acctMu     sync.Mutex
+	perAccount map[string]int
 }
 
 type helloEntry struct {
@@ -133,6 +167,19 @@ type srvSession struct {
 	held      []*heldQuery // guarded by session.mu
 	lastSeen  time.Time    // guarded by session.mu
 	abandoned rangeSet     // upstream pns the client gave up on; guarded by session.mu
+
+	// tr is the handshake transcript, for checking a sealed identity's MAC. Immutable.
+	tr []byte
+	// label is the account label from the hello, pinned for the session's whole life, so a
+	// later query cannot re-attribute it. Immutable, hence readable without the lock.
+	label string
+	// id is the session's identity, and dialCtx the context carrying it, built once and
+	// reused by every stream. Both are set before the session is reachable in label mode, or
+	// by the IDENT frame (under session.mu) in sealed mode, and never changed after.
+	id      *Identity
+	dialCtx context.Context
+	// counted is the account key counted in srv.perAccount, so it is released exactly once.
+	counted atomic.Pointer[string]
 }
 
 type heldQuery struct {
@@ -166,10 +213,12 @@ func Serve(ctx context.Context, pc net.PacketConn, cfg ServerConfig) error {
 	if err != nil {
 		return err
 	}
+	z.userLabel = cfg.IdentifyByLabel
 	s := &Server{cfg: cfg, z: z, pc: pc, ctx: ctx, signTokens: tokenBucket{rate: 200, tokens: 200, last: time.Now()},
-		helloQ:   make(chan helloJob, 256),
-		rrl:      make(map[netip.Prefix]*byteBucket),
-		sessions: make(map[uint16]*srvSession), hellos: make(map[[pubLen]byte]*helloEntry)}
+		helloQ:     make(chan helloJob, 256),
+		rrl:        make(map[netip.Prefix]*byteBucket),
+		perAccount: make(map[string]int),
+		sessions:   make(map[uint16]*srvSession), hellos: make(map[[pubLen]byte]*helloEntry)}
 	go func() {
 		<-ctx.Done()
 		pc.Close()
@@ -228,6 +277,12 @@ func (s *Server) handle(msg []byte, addr net.Addr) {
 		s.replyUnknown(q, addr)
 		return
 	}
+	// The label is pinned to the hello. A query bearing a different one is ignored rather than
+	// treated as an error: the name is not authenticated, so letting it end a session would
+	// hand any resolver on the path a way to kill an account's session by rewriting one label.
+	if q.label != "" && ss.label != "" && q.label != ss.label {
+		s.cfg.Logger.Warn("query label does not match the session's", "session", ss.label, "query", q.label)
+	}
 	if len(p) < 4+minPlain+tagLen {
 		s.noData(q, addr)
 		return
@@ -275,6 +330,8 @@ type helloJob struct {
 	q    *query
 	addr net.Addr
 	key  [pubLen]byte
+	// acct is what VerifyLabel resolved q.label to, already authorized (see hello).
+	acct any
 }
 
 // hello answers a retransmitted hello from the cache at once and hands a new one to the
@@ -287,6 +344,23 @@ func (s *Server) hello(q *query, addr net.Addr, eph []byte) {
 		return
 	}
 	j := helloJob{q: q, addr: addr}
+	// Authorize before anything expensive: a hello costs a key generation, an ECDH and a
+	// signature, so an account check here is what keeps unknown labels from buying any of it.
+	if s.z.userLabel {
+		if q.label == "" {
+			s.reply(q, addr, rcodeRefused, nil)
+			return
+		}
+		if s.cfg.VerifyLabel != nil {
+			acct, ok := s.cfg.VerifyLabel(q.label)
+			if !ok {
+				s.cfg.Logger.Debug("hello refused: unknown account", "label", q.label)
+				s.reply(q, addr, rcodeRefused, nil)
+				return
+			}
+			j.acct = acct
+		}
+	}
 	copy(j.key[:], eph)
 	s.mu.Lock()
 	h := s.hellos[j.key]
@@ -353,6 +427,21 @@ func (s *Server) handshake(j helloJob) {
 	key := j.key
 	cfg := streamConfig{StreamWindow: s.cfg.StreamWindow, SendBuffer: s.cfg.SendBuffer, MaxStreams: s.cfg.MaxStreams}
 	ss := &srvSession{session: newSession(false, cfg, down, up), srv: s, sid: sid, lastSeen: time.Now(), created: time.Now()}
+	if s.cfg.VerifyClient != nil {
+		// Only needed to check a sealed identity's MAC, so it is kept only when one may come.
+		ss.tr = transcript(key[:], reply[:pubLen], sid)
+		ss.onExt = ss.onExtFrame
+	}
+	if s.z.userLabel && j.q.label != "" {
+		ss.label = j.q.label
+		ss.setIdentity(&Identity{Label: j.q.label, Account: j.acct})
+		if !ss.takeAccount(ss.id) {
+			s.mu.Unlock()
+			s.cfg.Logger.Debug("hello refused: account at its session limit", "label", ss.label)
+			s.reply(q, addr, rcodeRefused, nil)
+			return
+		}
+	}
 	ss.wakeFn = ss.flush
 	// Streams count against MaxTotalStreams for as long as the session holds them (buffered,
 	// unacked data included), not just while their relay runs.
@@ -415,6 +504,7 @@ func (s *Server) evictUnusedLocked() bool {
 	}
 	delete(s.sessions, victim.sid)
 	s.forgetHelloLocked(victim.sid)
+	victim.releaseAccount()
 	go victim.close(ErrClosed)
 	return true
 }
@@ -648,7 +738,27 @@ func (ss *srvSession) serveStream(st *stream) {
 		c.Close()
 		return
 	}
-	ctx, cancel := context.WithTimeout(ss.srv.ctx, 30*time.Second)
+	// The identity context is built once per session, so a session with many streams does not
+	// rebuild it per dial.
+	ss.mu.Lock()
+	base, id := ss.dialCtx, ss.id
+	ss.mu.Unlock()
+	if base == nil {
+		base = ss.srv.ctx
+	}
+	if ss.srv.cfg.RequireIdentity && id == nil {
+		// No account: refuse the stream and leave the session to the 15 s unused-session sweep.
+		ss.srv.cfg.Logger.Debug("stream refused: session has no identity")
+		ss.mu.Lock()
+		ss.queueCtrl(ctrl{typ: frReset, id: st.id, val: 1})
+		st.abort(errors.New("soar: unidentified client"))
+		ss.maybeRemove(st)
+		ss.mu.Unlock()
+		ss.flush()
+		c.Close()
+		return
+	}
+	ctx, cancel := context.WithTimeout(base, 30*time.Second)
 	go func() {
 		select {
 		case <-st.aborted:
@@ -916,6 +1026,7 @@ func (s *Server) sweep() {
 					if s.sessions[ss.sid] == ss {
 						delete(s.sessions, ss.sid)
 						s.forgetHelloLocked(ss.sid)
+						ss.releaseAccount()
 					}
 					s.mu.Unlock()
 				}

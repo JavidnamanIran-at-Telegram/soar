@@ -62,7 +62,20 @@ type Config struct {
 	// client points them past its own tunnel, a test harness through a proxy. Defaults: net.
 	ListenPacket func(ctx context.Context, network, address string) (net.PacketConn, error)
 	DialTCP      func(ctx context.Context, network, address string) (net.Conn, error)
-	Logger       *slog.Logger
+	// Identity names this client to a server that meters accounts. The proof rides in the
+	// first upstream packet, inside the session's encryption, and covers the handshake
+	// transcript: a resolver sees ciphertext, and a captured proof authenticates no other
+	// session. Optional, and only for a server that asked for it - the frame uses an
+	// extension type an upstream server does not know, and SPEC §6 makes that an error.
+	Identity *ClientIdentity
+	Logger   *slog.Logger
+}
+
+// ClientIdentity is the credential a client presents to a server that meters accounts: the id
+// the server knows the account by, and the key the account's proof is computed with.
+type ClientIdentity struct {
+	KeyID [IdentKeyLen]byte
+	Key   []byte
 }
 
 // maxLimitClass is the answer-size class for MaxAnswer (512 + 48*class bytes).
@@ -313,6 +326,16 @@ func NewClient(cfg Config) (*Client, error) {
 	}
 	if z.maxPayload(cfg.SafeQName) < 2+pubLen {
 		return nil, errors.New("soar: SafeQName too short to carry a handshake under this zone")
+	}
+	if cfg.Identity != nil {
+		if len(cfg.Identity.Key) < 16 {
+			return nil, errors.New("soar: client identity needs a key of at least 16 bytes")
+		}
+		// The whole frame has to fit one packet: frames are never split across packets, and
+		// the smallest packet is the one a path starts at (SafeQName).
+		if z.maxPayload(cfg.SafeQName)-4-tagLen-1 < identFrameLen {
+			return nil, errors.New("soar: SafeQName too short to carry an identity under this zone")
+		}
 	}
 	if len(cfg.Resolvers) == 0 && !cfg.Discovery.Enabled {
 		return nil, errors.New("soar: no resolvers and discovery is off")
@@ -1248,6 +1271,13 @@ func (c *Client) onHelloLocked(q *pendingQuery, reply []byte, now time.Time) {
 	cs.session = newSession(true, cfg, up, down)
 	cs.wakeFn = c.wake
 	cs.sid = sid
+	if id := c.cfg.Identity; id != nil {
+		// The transcript the server signed, which is also what the proof covers: it holds both
+		// ephemeral keys and the session id, so this proof is good for this session alone.
+		tr := transcript(cs.eph.PublicKey().Bytes(), reply[:pubLen], sid)
+		cs.identFrame = appendIdent(nil, id.KeyID, identProof(id.Key, id.KeyID, tr))
+		cs.identQ = cs.identFrame
+	}
 	cs.established = true
 	cs.lastAuth = now
 	close(cs.ready)

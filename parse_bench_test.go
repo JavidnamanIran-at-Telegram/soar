@@ -28,3 +28,24 @@ func BenchmarkParseQuery(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkParseQueryLabel is the same with an account label to pick out of the name.
+func BenchmarkParseQueryLabel(b *testing.B) {
+	z, err := parseZone(testZone)
+	if err != nil {
+		b.Fatal(err)
+	}
+	z.userLabel = true
+	inner, err := parseZone("0123456789abcdef." + testZone)
+	if err != nil {
+		b.Fatal(err)
+	}
+	msg := benchQuery(b, inner)
+	b.ReportAllocs()
+	for b.Loop() {
+		q, err := parseQuery(msg, z)
+		if err != nil || q.payload == nil || q.label != "0123456789abcdef" {
+			b.Fatal("parse failed")
+		}
+	}
+}

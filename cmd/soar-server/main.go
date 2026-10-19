@@ -3,6 +3,11 @@
 //	soar-server keygen                      # prints a private and public key
 //	soar-server pubkey key                  # prints the public key for a private key file
 //	soar-server -zone t.example.com -key-file key -listen :53
+//
+// With -accounts it serves a known set of accounts rather than anyone holding the key, and
+// reports which account a stream belongs to so a caller can meter it:
+//
+//	soar-server -zone t.example.com -key-file key -accounts accounts.json -identify-by-label
 package main
 
 import (
@@ -19,6 +24,7 @@ import (
 	"slices"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/getlantern/soar"
 )
@@ -50,6 +56,10 @@ func main() {
 	listen := flag.String("listen", ":53", "UDP address to serve DNS on")
 	ports := flag.String("allow-ports", "80,443", `destination ports streams may reach, or "any"`)
 	private := flag.Bool("allow-private", false, "allow non-public destinations (lab use only)")
+	acctFile := flag.String("accounts", "", "JSON account table; re-read when it changes (see accounts.go)")
+	byLabel := flag.Bool("identify-by-label", false, "read the label above the zone as the account name")
+	requireID := flag.Bool("require-identity", false, "serve no streams to a session with no identity")
+	perAccount := flag.Int("max-sessions-per-account", 0, "cap concurrent sessions per account; 0 for no cap")
 	verbose := flag.Bool("v", false, "debug logging")
 	flag.Parse()
 	if *zone == "" || *keyFile == "" {
@@ -70,6 +80,15 @@ func main() {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
+	var accts *accounts
+	if *acctFile != "" {
+		if accts, err = loadAccounts(*acctFile, log); err != nil {
+			fatal(err)
+		}
+	} else if *byLabel || *requireID {
+		fatal(fmt.Errorf("-identify-by-label and -require-identity need -accounts"))
+	}
+
 	dialer := &net.Dialer{Control: soar.PublicOnly}
 	if *private {
 		dialer.Control = nil
@@ -83,6 +102,11 @@ func main() {
 		if *ports != "any" && !slices.Contains(allowed, port) {
 			return nil, fmt.Errorf("port %s not allowed", port)
 		}
+		if id, ok := soar.IdentityFromContext(ctx); ok {
+			if acct, _ := id.Account.(*Account); acct != nil {
+				log.Debug("stream", "account", acct.Name(), "sealed", id.Sealed)
+			}
+		}
 		return dialer.DialContext(ctx, network, addr)
 	}
 
@@ -92,14 +116,25 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	priv := ed25519.NewKeyFromSeed(seed)
+	cfg := soar.ServerConfig{Zone: *zone, PrivateKey: priv(seed), Dial: dial, Logger: log,
+		MaxSessionsPerAccount: *perAccount, RequireIdentity: *requireID}
+	if accts != nil {
+		cfg.IdentifyByLabel = *byLabel
+		cfg.VerifyClient = accts.verifyClient
+		if *byLabel {
+			cfg.VerifyLabel = accts.verifyLabel
+		}
+		go accts.watch(ctx.Done(), 10*time.Second)
+	}
 	// Log hygiene: never the zone or the key. Either one in a leaked log hands a censor the
 	// string it needs to block this server; `soar-server pubkey` prints the key on demand.
-	log.Info("serving", "listen", pc.LocalAddr())
-	if err := soar.Serve(ctx, pc, soar.ServerConfig{Zone: *zone, PrivateKey: priv, Dial: dial, Logger: log}); err != nil {
+	log.Info("serving", "listen", pc.LocalAddr(), "accounts", accts != nil)
+	if err := soar.Serve(ctx, pc, cfg); err != nil {
 		fatal(err)
 	}
 }
+
+func priv(seed []byte) ed25519.PrivateKey { return ed25519.NewKeyFromSeed(seed) }
 
 func fatal(err error) {
 	fmt.Fprintln(os.Stderr, "soar-server:", err)

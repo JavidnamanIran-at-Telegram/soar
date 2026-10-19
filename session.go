@@ -40,6 +40,7 @@ type sentRange struct {
 }
 
 type sentPkt struct {
+	ident   bool // carried the IDENT frame
 	pn      uint64
 	at      time.Time
 	streams []sentRange
@@ -87,6 +88,15 @@ type session struct {
 	streamGone func()
 	// onLostUnknown: the client reported an upstream pn lost that has no recorded reply.
 	onLostUnknown func(up uint64)
+	// onExt: an extension frame arrived. Called with s.mu held, for new packets only - a
+	// duplicate's frames are never reapplied, so an extension cannot be replayed. nil when
+	// this end uses no extension.
+	onExt func(sub uint64, body []byte) error
+	// identFrame is the client's encoded IDENT frame, and identQ it waiting to go out. A lost
+	// one is queued again: upstream has no acks, so a query that gets no answer is the loss
+	// signal (see declareLost). Client only; guarded by s.mu.
+	identFrame []byte
+	identQ     []byte
 }
 
 func newSession(client bool, cfg streamConfig, seal, open *packetCipher) *session {
@@ -285,6 +295,10 @@ func (s *session) receive(pn uint64, frames []byte, now time.Time) (bool, error)
 			}
 		case f.typ == frClose:
 			s.closeLocked(fmt.Errorf("soar: session closed by peer (code %d)", f.val))
+		case f.typ == frExt:
+			if s.onExt != nil {
+				return s.onExt(f.val, f.data)
+			}
 		case f.typ&0xF8 == frStream:
 			st := s.peerStream(f.id)
 			if st == nil {
@@ -441,6 +455,9 @@ func (s *session) declareLost(pn uint64) {
 		}
 		s.queueCtrl(c)
 	}
+	if p.ident && s.identQ == nil {
+		s.identQ = s.identFrame
+	}
 	// Ack ranges this packet carried still need conveying, if they're recent.
 	for _, a := range p.ack {
 		if s.recvd.contains(a.lo) {
@@ -473,7 +490,7 @@ func (s *session) requeue(p *sentPkt) bool {
 
 // hasData reports whether anything other than acks is waiting to be sent. Caller holds s.mu.
 func (s *session) hasData() bool {
-	if len(s.ctrlQ) > 0 || len(s.lostQ) > 0 {
+	if len(s.ctrlQ) > 0 || len(s.lostQ) > 0 || len(s.identQ) > 0 {
 		return true
 	}
 	for _, id := range s.rr {
@@ -505,6 +522,13 @@ func (s *session) build(b []byte, budget int, now time.Time, replyTo uint64) (pn
 	p := &sentPkt{pn: s.nextPN, at: now, replyTo: replyTo}
 	s.nextPN++
 
+	// Identity before anything else: a server that requires one dials nothing until it has it.
+	if len(s.identQ) > 0 && len(s.identQ) <= room() {
+		b = append(b, s.identQ...)
+		s.identQ = nil
+		p.ident = true
+		data = true
+	}
 	// Control frames first: they unblock the peer.
 	for len(s.ctrlQ) > 0 {
 		c := s.ctrlQ[0]

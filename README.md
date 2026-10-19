@@ -3,6 +3,11 @@
 **Soar is a DNS tunnel built to be the fastest and most reliable way through networks that censor
 everything except DNS.**
 
+> **This is a fork** of [getlantern/soar](https://github.com/getlantern/soar). It adds optional
+> per-account client identity so one server can meter a known set of accounts, and nothing else:
+> leave it off and you have upstream. See [Per-account servers](#per-account-servers) and
+> [FORK.md](FORK.md).
+
 Website: **[soar.lantern.io](https://soar.lantern.io)**, with how it works and benchmarks (source in
 [getlantern/soar-site](https://github.com/getlantern/soar-site)). A wire-compatible Rust client and
 server live in [getlantern/soar-rs](https://github.com/getlantern/soar-rs). Soar is the
@@ -114,6 +119,68 @@ conn, err := c.DialContext(ctx, "tcp", "example.com:443")
 
 `Client` also implements kindling's DNS-tunnel interface (`NewRoundTripper`, `MaxLength`,
 `RequestTimeout`, `Close`), so it plugs into `kindling.WithDNSTunnel`.
+
+## Per-account servers
+
+Upstream Soar has no notion of a client: one server key is shared by everyone who holds it, and
+`Dial` is told only where to connect. That is right for a public bootstrap transport. A server run
+for accounts it meters needs to know whose traffic it is carrying, and this fork gives it two ways
+(both off by default, both specified in [SPEC.md §11](SPEC.md)):
+
+```sh
+soar-server -zone t.example.com -key-file key -accounts accounts.json -identify-by-label
+```
+
+```json
+[
+  {"label": "0123456789abcdef"},
+  {"label": "member02", "key_id": "a1b2c3d4e5f60708", "key": "<base64, >=16 bytes>"}
+]
+```
+
+The file is re-read when it changes, so accounts come and go without restarting the server and
+dropping every session. A file that does not parse is kept out: nobody is logged out by a
+half-written write.
+
+**By label.** The client is configured with `<account>.t.example.com` instead of
+`t.example.com`, and that is the only change — every existing client works, and the one `NS`
+record for the zone already covers the subtree. `Dial` then gets the account:
+
+```go
+if id, ok := soar.IdentityFromContext(ctx); ok {
+	meter(id.Account)   // whatever VerifyLabel returned
+}
+```
+
+The label travels in the query name in cleartext, so it is a bearer credential and a stable
+per-account selector for every resolver on the path. Encrypting it buys nothing — the client sends
+one fixed zone verbatim, so the label is constant either way. The fork pins it to the handshake,
+folds its case, restricts its characters and checks it before spending a handshake on it, but
+those are limits on the damage, not a fix.
+
+**Inside the handshake.** A client that can be changed proves its account instead, with a MAC over
+the handshake transcript, in the first upstream packet and under the session's encryption:
+
+```go
+c, err := soar.NewClient(soar.Config{
+	Zone:      "t.example.com",
+	ServerKey: serverPublicKey,
+	Resolvers: []string{"8.8.8.8:53"},
+	Identity:  &soar.ClientIdentity{KeyID: keyID, Key: sharedKey},
+})
+```
+
+A resolver sees ciphertext, there is no per-account name anywhere, and the proof covers both
+ephemeral keys and the session id, so a captured one authenticates nothing else. The server can
+require it (`RequireIdentity`) and cap how many sessions one account may hold
+(`MaxSessionsPerAccount`).
+
+| | label | inside the handshake |
+|---|---|---|
+| client change | none | sends one frame |
+| visible to resolvers | yes, constant per account | no |
+| replayable by a resolver | yes | no |
+| works with upstream clients | yes | no (uses the EXT frame) |
 
 ## Benchmarks
 

@@ -16,6 +16,12 @@ The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 **Status:** pre-release. Version 1 may still change until it's declared stable. Every change to the
 wire format also regenerates the test vectors (section 10).
 
+**Fork note.** This is a fork of [getlantern/soar](https://github.com/getlantern/soar). It adds one
+frame type, EXT (`0x10`), and optional client identity on top of it (section 11). Both are
+described here in the same terms as the rest of v1 so that an implementation can interoperate with
+this fork, and both are off unless a server asks for them: a server and client that leave them
+alone are byte-for-byte upstream v1. See [FORK.md](FORK.md) for why the fork exists.
+
 ## 1. Overview
 
 A **client** carries TCP streams to a **server** through recursive DNS resolvers. The server is
@@ -350,7 +356,7 @@ session as failed and end it (vectors: `bad_frames`).
 | `0x08`–`0x0F` | STREAM | both | stream id, [offset], [length], data |
 | `0x10` | EXT | both | sub-type, length, body |
 
-**EXT** (`0x10`). `sub_type (varint) || length (varint) || body`. The length makes the frame
+**EXT** (`0x10`, fork). `sub_type (varint) || length (varint) || body`. The length makes the frame
 skippable: a receiver that does not know `sub_type` MUST ignore the frame and carry on with the
 frames after it, rather than failing the session. `length` MUST be at most 256; a larger one, or a
 body the packet does not hold, fails the session like any malformed frame.
@@ -604,3 +610,90 @@ Two notes on the `frames` vectors:
   omits LEN.
 - In `padding runs to the end of the packet`, everything after the PADDING byte is ignored, even the
   nonzero last byte. Re-encoding the parsed frames gives only the leading `01`.
+## 11. Client identity (optional, fork)
+
+Nothing in v1 identifies a client. One server key is shared by everyone who holds it, which is
+right for a public bootstrap transport and wrong for a server run for a known set of accounts.
+Such a server has to tell accounts apart to meter them, and this section describes the two ways it
+may, both optional and both off unless the server asks.
+
+### 11.1 Account label in the query name
+
+The server MAY read the label directly above its zone as an account name rather than as payload.
+A client needs no change: it is configured with `<account>.<zone>` instead of `<zone>`, and
+everything it encodes (section 3.1) stays above that label. The zone the server is delegated
+covers the whole subtree, so one NS record serves every account.
+
+A server doing this:
+
+- MUST fold the label to lower case before looking it up. A resolver may randomize the case of a
+  name on its way to the server (the same reason the base32 payload decodes case-insensitively,
+  section 3.1), so the bytes that arrive are not necessarily the bytes the client was configured
+  with.
+- SHOULD refuse a label outside a restricted set - the reference fork accepts `a-z`, `0-9`, `-`
+  and `_`, at most 63 bytes - because a DNS label may hold any octet and the value reaches
+  account lookups, logs and backend credentials.
+- MUST take the label from the hello and keep it for the session's whole life. A later query
+  bearing a different label MUST NOT re-attribute the session, and SHOULD NOT end it either: the
+  name is not authenticated, so ending it would let any resolver on the path kill an account's
+  session by rewriting one label.
+- SHOULD refuse an unrecognized label at the hello, before the key generation, ECDH and signature
+  that answering a hello costs.
+
+**What this does not do.** The label is in the query name in cleartext, so it is a bearer
+credential and a stable per-account selector for anyone who carries the query. Encrypting it
+gains nothing: the client sends one fixed zone verbatim on every query, so the label is constant,
+and a constant ciphertext is as copyable as a constant hash. Pinning it to the hello stops a
+session being re-attributed in flight; it cannot stop an on-path resolver attributing a session
+wrongly from the start. Section 11.2 is what fixes that, for a client that can be changed.
+
+### 11.2 IDENT: identity inside the handshake
+
+A client MAY prove an account with an EXT frame of sub-type `0x01`, IDENT, in its first upstream
+packet. The body is:
+
+```
+key_id (8) || proof (16)
+```
+
+where
+
+```
+proof = HMAC-SHA256(key, "soar v1 client auth" || key_id || T)[:16]
+```
+
+`key` is a secret of at least 16 bytes shared by the client and the server, `key_id` names the
+account, and `T` is the handshake transcript of section 4.2:
+
+```
+T = "soar v1 hello" || client eph pub || server eph pub || sid (u16)
+```
+
+The whole frame is 27 bytes, which fits the smallest packet a path ever sends: frames are never
+split across packets, and at the 101-character name length some networks impose (section 3.1,
+"Small upstream overhead" in the README) a packet carries about 40 bytes of frames. This is why
+the proof is a truncated MAC rather than a public key and signature, which would be 96 bytes on
+their own and could never ride the first packet.
+
+A server that accepts IDENT:
+
+- MUST compare the proof in constant time, and MUST reject an unknown `key_id`.
+- MUST take the first valid IDENT as the session's identity and ignore any later one, so a live
+  session cannot be re-attributed.
+- SHOULD end the session on an IDENT it cannot verify. Only the client that completed the
+  handshake can produce a frame inside the session's keys at all, so a proof that does not check
+  out is that client's own doing.
+- MAY refuse to open streams for a session that has not identified itself. §7 already ends a
+  session that sent no valid data packet within 15 s of its hello, so nothing extra is needed to
+  reap one that never will.
+
+Properties, and why this shape:
+
+- **Invisible to resolvers.** The frame is inside `seal(...)` (section 4.4), so a resolver sees
+  ciphertext. There is no per-account string in any name, and no per-account zone to delegate.
+- **Not replayable.** `T` holds both ephemeral public keys and the sid, so it is unique per
+  session; a captured proof authenticates nothing else. `key_id` is covered too, so a proof
+  cannot be re-presented under another account's id.
+- **No query-name cost.** The hello (section 4.2) is untouched and the name budget is unchanged.
+- **Optional on both sides.** A client with no identity sends nothing; a server that wants none
+  ignores it. A public server behaves exactly as upstream.
